@@ -3,4 +3,4 @@
 mod board;
 mod move_logic;
 
-pub use board::{Board, Direction, GameStatus};
+pub use board::{Board, Direction, GameStatus, Tile};

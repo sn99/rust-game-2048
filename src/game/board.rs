@@ -1,4 +1,4 @@
-use super::move_logic::slide_line;
+use super::move_logic::{slide_tile_line, LineTile, SlidTile};
 
 /// Move direction on the 4×4 board.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -19,11 +19,24 @@ pub enum GameStatus {
     Over,
 }
 
-/// Classic 4×4 2048 board.
+/// A single tile with stable identity for CSS transitions.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Tile {
+    pub id: u64,
+    pub value: u32,
+    pub row: u8,
+    pub col: u8,
+    /// Freshly spawned — play appear animation (not slide).
+    pub is_new: bool,
+    /// Just created by a merge — play pop animation.
+    pub is_merged: bool,
+}
+
+/// Classic 4×4 2048 board with identity-tracked tiles.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Board {
-    /// `cells[row][col]`, 0 = empty.
-    cells: [[u32; 4]; 4],
+    tiles: Vec<Tile>,
+    next_id: u64,
     score: u32,
     status: GameStatus,
     /// True after the first 2048 tile appears (suppresses re-win overlay).
@@ -34,13 +47,14 @@ impl Board {
     /// New game with two random tiles.
     pub fn new(rng: &mut fastrand::Rng) -> Self {
         let mut board = Self {
-            cells: [[0; 4]; 4],
+            tiles: Vec::new(),
+            next_id: 1,
             score: 0,
             status: GameStatus::Playing,
             won_once: false,
         };
-        board.spawn_tile(rng);
-        board.spawn_tile(rng);
+        board.spawn_tile(rng, true);
+        board.spawn_tile(rng, true);
         board
     }
 
@@ -48,7 +62,8 @@ impl Board {
     #[cfg(test)]
     pub fn empty() -> Self {
         Self {
-            cells: [[0; 4]; 4],
+            tiles: Vec::new(),
+            next_id: 1,
             score: 0,
             status: GameStatus::Playing,
             won_once: false,
@@ -58,17 +73,34 @@ impl Board {
     #[cfg(test)]
     pub fn from_cells(cells: [[u32; 4]; 4]) -> Self {
         let mut board = Self {
-            cells,
+            tiles: Vec::new(),
+            next_id: 1,
             score: 0,
             status: GameStatus::Playing,
             won_once: false,
         };
+        for r in 0..4 {
+            for c in 0..4 {
+                if cells[r][c] != 0 {
+                    board.push_tile(r as u8, c as u8, cells[r][c], false, false);
+                }
+            }
+        }
         board.refresh_status_after_setup();
         board
     }
 
-    pub fn cells(&self) -> &[[u32; 4]; 4] {
-        &self.cells
+    pub fn tiles(&self) -> &[Tile] {
+        &self.tiles
+    }
+
+    /// Grid view for tests / debugging.
+    pub fn cells(&self) -> [[u32; 4]; 4] {
+        let mut cells = [[0u32; 4]; 4];
+        for t in &self.tiles {
+            cells[t.row as usize][t.col as usize] = t.value;
+        }
+        cells
     }
 
     pub fn score(&self) -> u32 {
@@ -100,45 +132,90 @@ impl Board {
         *self = Self::new(rng);
     }
 
-    /// Attempt a move. Returns whether the board changed.
-    /// Spawns a tile only if something moved. Updates win/lose status.
-    pub fn try_move(&mut self, dir: Direction, rng: &mut fastrand::Rng) -> bool {
+    /// Slide/merge only (no spawn). Returns whether anything changed.
+    /// Call [`spawn_after_move`] after the slide animation (~100ms).
+    pub fn try_move(&mut self, dir: Direction) -> bool {
         if self.status == GameStatus::Over || self.status == GameStatus::Won {
-            // Block moves while win overlay is up; Over is terminal until reset.
             return false;
         }
 
-        let (next, gained) = apply_move(&self.cells, dir);
-        if next == self.cells {
+        // Clear animation flags so prior new/merge classes don't stick.
+        for t in &mut self.tiles {
+            t.is_new = false;
+            t.is_merged = false;
+        }
+
+        let (next_tiles, gained, moved) = apply_tile_move(&self.tiles, dir);
+        if !moved {
             return false;
         }
 
-        self.cells = next;
+        self.tiles = next_tiles;
         self.score += gained;
-        self.spawn_tile(rng);
-        self.update_status_after_move();
+        self.check_win_only();
         true
     }
 
+    /// Spawn one random tile after a successful move, then re-evaluate lose.
+    pub fn spawn_after_move(&mut self, rng: &mut fastrand::Rng) {
+        self.spawn_tile(rng, true);
+        self.finalize_status_after_spawn();
+    }
 
-    fn spawn_tile(&mut self, rng: &mut fastrand::Rng) {
-        let empties: Vec<(usize, usize)> = (0..4)
-            .flat_map(|r| (0..4).map(move |c| (r, c)))
-            .filter(|&(r, c)| self.cells[r][c] == 0)
+    /// Full move used by tests (slide + immediate spawn).
+    #[cfg(test)]
+    pub fn try_move_with_spawn(&mut self, dir: Direction, rng: &mut fastrand::Rng) -> bool {
+        if !self.try_move(dir) {
+            return false;
+        }
+        self.spawn_after_move(rng);
+        true
+    }
+
+    fn push_tile(&mut self, row: u8, col: u8, value: u32, is_new: bool, is_merged: bool) {
+        let id = self.next_id;
+        self.next_id += 1;
+        self.tiles.push(Tile {
+            id,
+            value,
+            row,
+            col,
+            is_new,
+            is_merged,
+        });
+    }
+
+    fn spawn_tile(&mut self, rng: &mut fastrand::Rng, is_new: bool) {
+        let occupied: [[bool; 4]; 4] = {
+            let mut o = [[false; 4]; 4];
+            for t in &self.tiles {
+                o[t.row as usize][t.col as usize] = true;
+            }
+            o
+        };
+        let empties: Vec<(u8, u8)> = (0..4u8)
+            .flat_map(|r| (0..4u8).map(move |c| (r, c)))
+            .filter(|&(r, c)| !occupied[r as usize][c as usize])
             .collect();
         if empties.is_empty() {
             return;
         }
         let (r, c) = empties[rng.usize(..empties.len())];
-        // 90% → 2, 10% → 4
-        self.cells[r][c] = if rng.f32() < 0.9 { 2 } else { 4 };
+        let value = if rng.f32() < 0.9 { 2 } else { 4 };
+        self.push_tile(r, c, value, is_new, false);
     }
 
-    fn update_status_after_move(&mut self) {
-        let has_2048 = self.cells.iter().flatten().any(|&v| v >= 2048);
+    fn check_win_only(&mut self) {
+        let has_2048 = self.tiles.iter().any(|t| t.value >= 2048);
         if has_2048 && !self.won_once {
             self.status = GameStatus::Won;
             self.won_once = true;
+        }
+    }
+
+    fn finalize_status_after_spawn(&mut self) {
+        // Keep win overlay until user continues.
+        if self.status == GameStatus::Won {
             return;
         }
         if !self.has_moves() {
@@ -150,7 +227,7 @@ impl Board {
 
     #[cfg(test)]
     fn refresh_status_after_setup(&mut self) {
-        let has_2048 = self.cells.iter().flatten().any(|&v| v >= 2048);
+        let has_2048 = self.tiles.iter().any(|t| t.value >= 2048);
         if has_2048 {
             self.won_once = true;
         }
@@ -160,22 +237,20 @@ impl Board {
     }
 
     fn has_moves(&self) -> bool {
-        // Empty cell
-        if self.cells.iter().flatten().any(|&v| v == 0) {
+        let cells = self.cells();
+        if cells.iter().flatten().any(|&v| v == 0) {
             return true;
         }
-        // Horizontal merge
         for r in 0..4 {
             for c in 0..3 {
-                if self.cells[r][c] == self.cells[r][c + 1] {
+                if cells[r][c] == cells[r][c + 1] {
                     return true;
                 }
             }
         }
-        // Vertical merge
         for c in 0..4 {
             for r in 0..3 {
-                if self.cells[r][c] == self.cells[r + 1][c] {
+                if cells[r][c] == cells[r + 1][c] {
                     return true;
                 }
             }
@@ -184,51 +259,94 @@ impl Board {
     }
 }
 
-fn apply_move(cells: &[[u32; 4]; 4], dir: Direction) -> ([[u32; 4]; 4], u32) {
-    let mut out = [[0u32; 4]; 4];
+fn grid_from_tiles(tiles: &[Tile]) -> [[Option<LineTile>; 4]; 4] {
+    let mut grid = [[None; 4]; 4];
+    for t in tiles {
+        grid[t.row as usize][t.col as usize] = Some(LineTile {
+            id: t.id,
+            value: t.value,
+        });
+    }
+    grid
+}
+
+fn tiles_from_grid(grid: [[Option<SlidTile>; 4]; 4]) -> Vec<Tile> {
+    let mut out = Vec::new();
+    for r in 0..4 {
+        for c in 0..4 {
+            if let Some(t) = grid[r][c] {
+                out.push(Tile {
+                    id: t.id,
+                    value: t.value,
+                    row: r as u8,
+                    col: c as u8,
+                    is_new: false,
+                    is_merged: t.is_merged,
+                });
+            }
+        }
+    }
+    out
+}
+
+fn apply_tile_move(tiles: &[Tile], dir: Direction) -> (Vec<Tile>, u32, bool) {
+    let before = grid_from_tiles(tiles);
+    let mut after = [[None; 4]; 4];
     let mut score = 0u32;
 
     match dir {
         Direction::Left => {
             for r in 0..4 {
-                let (line, s) = slide_line(cells[r]);
-                out[r] = line;
+                let (line, s) = slide_tile_line(before[r]);
+                after[r] = line;
                 score += s;
             }
         }
         Direction::Right => {
             for r in 0..4 {
-                let mut rev = cells[r];
+                let mut rev = before[r];
                 rev.reverse();
-                let (mut line, s) = slide_line(rev);
+                let (mut line, s) = slide_tile_line(rev);
                 line.reverse();
-                out[r] = line;
+                after[r] = line;
                 score += s;
             }
         }
         Direction::Up => {
             for c in 0..4 {
-                let col = [cells[0][c], cells[1][c], cells[2][c], cells[3][c]];
-                let (line, s) = slide_line(col);
+                let col = [before[0][c], before[1][c], before[2][c], before[3][c]];
+                let (line, s) = slide_tile_line(col);
                 for r in 0..4 {
-                    out[r][c] = line[r];
+                    after[r][c] = line[r];
                 }
                 score += s;
             }
         }
         Direction::Down => {
             for c in 0..4 {
-                let col = [cells[3][c], cells[2][c], cells[1][c], cells[0][c]];
-                let (line, s) = slide_line(col);
+                let col = [before[3][c], before[2][c], before[1][c], before[0][c]];
+                let (line, s) = slide_tile_line(col);
                 for r in 0..4 {
-                    out[3 - r][c] = line[r];
+                    after[3 - r][c] = line[r];
                 }
                 score += s;
             }
         }
     }
 
-    (out, score)
+    let next = tiles_from_grid(after);
+
+    let mut old_vals = [[0u32; 4]; 4];
+    for t in tiles {
+        old_vals[t.row as usize][t.col as usize] = t.value;
+    }
+    let mut new_vals = [[0u32; 4]; 4];
+    for t in &next {
+        new_vals[t.row as usize][t.col as usize] = t.value;
+    }
+    let moved = old_vals != new_vals;
+
+    (next, score, moved)
 }
 
 #[cfg(test)]
@@ -242,8 +360,7 @@ mod tests {
     #[test]
     fn new_has_two_tiles() {
         let b = Board::new(&mut rng());
-        let n = b.cells().iter().flatten().filter(|&&v| v != 0).count();
-        assert_eq!(n, 2);
+        assert_eq!(b.tiles().len(), 2);
         assert_eq!(b.score(), 0);
         assert_eq!(b.status(), GameStatus::Playing);
     }
@@ -256,12 +373,10 @@ mod tests {
             [0, 0, 0, 0],
             [0, 0, 0, 0],
         ]);
-        // Use a board full of known state; after move one spawn appears.
-        let moved = b.try_move(Direction::Left, &mut rng());
+        let moved = b.try_move_with_spawn(Direction::Left, &mut rng());
         assert!(moved);
         assert_eq!(b.cells()[0][0], 4);
         assert_eq!(b.score(), 4);
-        // Exactly one extra non-zero from spawn (plus the 4)
         let nonzero = b.cells().iter().flatten().filter(|&&v| v != 0).count();
         assert_eq!(nonzero, 2);
     }
@@ -275,9 +390,9 @@ mod tests {
             [0, 0, 0, 0],
         ];
         let mut b = Board::from_cells(cells);
-        let moved = b.try_move(Direction::Left, &mut rng());
+        let moved = b.try_move_with_spawn(Direction::Left, &mut rng());
         assert!(!moved);
-        assert_eq!(b.cells(), &cells);
+        assert_eq!(b.cells(), cells);
         assert_eq!(b.score(), 0);
     }
 
@@ -289,7 +404,7 @@ mod tests {
             [0, 0, 0, 0],
             [0, 0, 0, 0],
         ]);
-        b.try_move(Direction::Left, &mut rng());
+        b.try_move_with_spawn(Direction::Left, &mut rng());
         assert_eq!(b.cells()[0][0], 4);
         assert_eq!(b.cells()[0][1], 4);
         assert_eq!(b.score(), 8);
@@ -303,14 +418,12 @@ mod tests {
             [0, 0, 0, 0],
             [0, 0, 0, 0],
         ]);
-        b.try_move(Direction::Left, &mut rng());
+        b.try_move_with_spawn(Direction::Left, &mut rng());
         assert_eq!(b.cells()[0][0], 2048);
         assert_eq!(b.status(), GameStatus::Won);
-        // Moves blocked while Won
-        assert!(!b.try_move(Direction::Left, &mut rng()));
+        assert!(!b.try_move(Direction::Left));
         b.continue_after_win();
         assert_eq!(b.status(), GameStatus::Playing);
-        // No second win overlay for higher tiles
         assert!(b.won_once());
     }
 
@@ -344,7 +457,7 @@ mod tests {
             [0, 0, 0, 0],
             [2, 0, 0, 0],
         ]);
-        assert!(b.try_move(Direction::Up, &mut rng()));
+        assert!(b.try_move_with_spawn(Direction::Up, &mut rng()));
         assert_eq!(b.cells()[0][0], 2);
 
         let mut b = Board::from_cells([
@@ -353,7 +466,7 @@ mod tests {
             [0, 0, 0, 0],
             [0, 0, 0, 0],
         ]);
-        assert!(b.try_move(Direction::Down, &mut rng()));
+        assert!(b.try_move_with_spawn(Direction::Down, &mut rng()));
         assert_eq!(b.cells()[3][0], 2);
     }
 
@@ -365,10 +478,26 @@ mod tests {
             [0, 0, 0, 0],
             [0, 0, 0, 0],
         ]);
-        b.try_move(Direction::Left, &mut rng());
+        b.try_move_with_spawn(Direction::Left, &mut rng());
         assert!(b.score() > 0);
         b.reset(&mut rng());
         assert_eq!(b.score(), 0);
         assert_eq!(b.status(), GameStatus::Playing);
+    }
+
+    #[test]
+    fn slide_preserves_tile_id() {
+        let mut b = Board::from_cells([
+            [0, 0, 0, 2],
+            [0, 0, 0, 0],
+            [0, 0, 0, 0],
+            [0, 0, 0, 0],
+        ]);
+        let id = b.tiles()[0].id;
+        b.try_move(Direction::Left);
+        assert_eq!(b.tiles().len(), 1);
+        assert_eq!(b.tiles()[0].id, id);
+        assert_eq!(b.tiles()[0].col, 0);
+        assert_eq!(b.tiles()[0].value, 2);
     }
 }
