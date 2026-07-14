@@ -8,7 +8,10 @@ use crate::input::{
     direction_from_swipe, touch_end_delta, touch_start_coords, use_keyboard, TouchTracker,
 };
 use crate::progress::reveal_progress_range;
-use crate::reddit::{filter_live_media, load_random_image, media_seen_in_session, warm_media_cache, RedditMedia};
+use crate::reddit::{
+    filter_live_media, load_random_image, media_seen_in_session, normalize_subreddit,
+    warm_media_cache, RedditMedia,
+};
 use crate::storage::{
     load_best, load_goal, load_session_seen_urls, load_subreddit, load_subreddit_pool,
     push_recent_media_urls, save_best, save_goal, save_subreddit,
@@ -270,13 +273,14 @@ pub fn App() -> impl IntoView {
         });
     };
 
-    /// Load next media. `reset_board`: true for New image / Try again; false for Keep going.
+    /// Load next media. `reset_board`: true for New image; false for Keep going.
     let load_media = move |reset_board: bool| {
         if loading.get_untracked() {
             return;
         }
 
         let raw = subreddit.get_untracked();
+        let want_sub = normalize_subreddit(&raw).unwrap_or_else(|| raw.trim().to_string());
         loading.set(true);
         load_status.set("Loading media (skipping deleted)…".into());
 
@@ -284,8 +288,14 @@ pub fn App() -> impl IntoView {
             let mut avoid = load_session_seen_urls();
 
             if let Some((img, window)) = preloaded.get_untracked() {
-                preloaded.set(None);
-                if !media_seen_in_session(&img, &avoid) {
+                // Only use a prefetch that matches the sub the user currently wants.
+                let pre_sub = normalize_subreddit(&img.subreddit)
+                    .unwrap_or_else(|| img.subreddit.clone());
+                if !want_sub.is_empty()
+                    && pre_sub.eq_ignore_ascii_case(&want_sub)
+                    && !media_seen_in_session(&img, &avoid)
+                {
+                    preloaded.set(None);
                     if let Some(live) = filter_live_media(img).await {
                         if !media_seen_in_session(&live, &avoid) {
                             apply_loaded_media(live, window, reset_board);
@@ -294,6 +304,9 @@ pub fn App() -> impl IntoView {
                             return;
                         }
                     }
+                } else {
+                    // Stale prefetch for another sub — drop it.
+                    preloaded.set(None);
                 }
             }
 
@@ -319,22 +332,24 @@ pub fn App() -> impl IntoView {
     let keep_going = Callback::new(move |_: ()| {
         board.update(|b| b.continue_after_win());
         // New post starts blurred; unblurs as you build toward the next double.
+        // Stays on the same subreddit (does not run Random).
         if !subreddit.get_untracked().trim().is_empty() || image.get_untracked().is_some() {
             load_media(false);
         }
     });
 
+    /// Reset the board only — keep the same subreddit and the same media.
     let try_again = Callback::new(move |_: ()| {
         animating.set(false);
         let g = goal.get_untracked();
         board.update(|b| {
             let _ = rng.try_update_value(|r| b.reset_with_goal(r, g));
         });
+        // Re-blur current image from the start of this run.
         reveal_from.set(2);
         reveal_to.set(g);
-        if !subreddit.get_untracked().trim().is_empty() || image.get_untracked().is_some() {
-            load_media(true);
-        }
+        lightbox_sharp.set(false);
+        // Do NOT fetch a new post or change the subreddit.
     });
 
     let on_clear_image = Callback::new(move |_: ()| {
