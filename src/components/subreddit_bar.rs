@@ -11,15 +11,15 @@ pub fn SubredditBar(
     view! {
         <section class="panel subreddit-bar compact-panel">
             <div class="subreddit-row">
-                <span class="panel-title inline-title">"r/"</span>
+                <span class="panel-title inline-title">"Sub"</span>
                 <input
                     id="subreddit-input"
                     class="subreddit-input"
                     type="text"
                     prop:value=move || subreddit.get()
                     prop:disabled=move || loading.get()
-                    placeholder="pics"
-                    maxlength="32"
+                    placeholder="pics or reddit.com/r/pics"
+                    maxlength="200"
                     autocomplete="off"
                     spellcheck="false"
                     on:input=move |ev| {

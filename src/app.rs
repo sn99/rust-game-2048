@@ -36,6 +36,7 @@ pub fn App() -> impl IntoView {
 
     let subreddit = RwSignal::new(load_subreddit());
     let image = RwSignal::new(None::<RedditImage>);
+    let slide_index = RwSignal::new(0usize);
     let load_status = RwSignal::new(String::new());
     let loading = RwSignal::new(false);
     let lightbox_open = RwSignal::new(false);
@@ -46,13 +47,28 @@ pub fn App() -> impl IntoView {
     let tiles = Signal::derive(move || board.get().tiles().to_vec());
     let max_tile = Signal::derive(move || board.get().max_tile());
     let win_tile = Signal::derive(move || goal.get());
-    let image_url = Signal::derive(move || image.get().map(|i| i.url.clone()));
+    let image_urls = Signal::derive(move || {
+        image
+            .get()
+            .map(|i| i.urls.clone())
+            .unwrap_or_default()
+    });
     let image_title =
         Signal::derive(move || image.get().map(|i| i.title.clone()).unwrap_or_default());
     let image_permalink = Signal::derive(move || image.get().map(|i| i.permalink.clone()));
     let has_image = Signal::derive(move || image.get().is_some());
+    let post_unlocked = Signal::derive(move || max_tile.get() >= win_tile.get() && win_tile.get() > 0);
     let reveal_pct = Signal::derive(move || {
         (reveal_progress(max_tile.get(), goal.get()) * 100.0).round() as u32
+    });
+    // Ambient + panel current slide
+    let current_image_url = Signal::derive(move || {
+        let urls = image_urls.get();
+        if urls.is_empty() {
+            return None;
+        }
+        let i = slide_index.get().min(urls.len() - 1);
+        Some(urls[i].clone())
     });
 
     let finish_move = move || {
@@ -129,23 +145,35 @@ pub fn App() -> impl IntoView {
                 Ok((img, window)) => {
                     save_subreddit(&img.subreddit);
                     subreddit.set(img.subreddit.clone());
-                    push_recent_image_url(&img.url);
+                    push_recent_image_url(img.primary_url());
+                    let gallery_bit = if img.is_gallery() {
+                        format!(" · {} photos", img.urls.len())
+                    } else {
+                        String::new()
+                    };
                     let title_bit = if img.title.is_empty() {
                         String::new()
                     } else {
-                        let t = if img.title.len() > 60 {
-                            format!("{}…", &img.title[..57])
+                        let t = if img.title.len() > 50 {
+                            format!("{}…", &img.title[..47])
                         } else {
                             img.title.clone()
                         };
                         format!(" — {t}")
                     };
                     load_status.set(format!(
-                        "r/{} · {}{}",
-                        img.subreddit, window, title_bit
+                        "r/{} · {}{}{}",
+                        img.subreddit, window, gallery_bit, title_bit
                     ));
+                    slide_index.set(0);
                     image.set(Some(img));
                     lightbox_sharp.set(false);
+                    // New image → fresh puzzle
+                    animating.set(false);
+                    let g = goal.get_untracked();
+                    board.update(|b| {
+                        let _ = rng.try_update_value(|r| b.reset_with_goal(r, g));
+                    });
                 }
                 Err(e) => {
                     load_status.set(e.to_string());
@@ -157,6 +185,7 @@ pub fn App() -> impl IntoView {
 
     let on_clear_image = Callback::new(move |_: ()| {
         image.set(None);
+        slide_index.set(0);
         lightbox_open.set(false);
         load_status.set(String::new());
     });
@@ -191,11 +220,12 @@ pub fn App() -> impl IntoView {
     };
 
     view! {
-        <RevealBackground image_url=image_url max_tile=max_tile win_tile=win_tile />
+        <RevealBackground image_url=current_image_url max_tile=max_tile win_tile=win_tile />
         <Lightbox
             open=lightbox_open
-            image_url=image_url
+            image_urls=image_urls
             image_title=image_title
+            slide_index=slide_index
             max_tile=max_tile
             win_tile=win_tile
             sharp=lightbox_sharp
@@ -236,9 +266,11 @@ pub fn App() -> impl IntoView {
                         has_image=has_image
                     />
                     <ImagePanel
-                        image_url=image_url
+                        image_urls=image_urls
                         image_title=image_title
                         image_permalink=image_permalink
+                        slide_index=slide_index
+                        post_unlocked=post_unlocked
                         max_tile=max_tile
                         win_tile=win_tile
                         reveal_pct=reveal_pct

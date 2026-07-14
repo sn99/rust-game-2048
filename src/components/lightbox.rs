@@ -2,24 +2,47 @@ use crate::progress::{blur_px, image_opacity};
 use leptos::prelude::*;
 use web_sys::KeyboardEvent;
 
-/// Fullscreen lightbox: entire image, aspect preserved, same unblur as the game.
 #[component]
 pub fn Lightbox(
     open: RwSignal<bool>,
-    image_url: Signal<Option<String>>,
+    image_urls: Signal<Vec<String>>,
     image_title: Signal<String>,
+    slide_index: RwSignal<usize>,
     max_tile: Signal<u32>,
     win_tile: Signal<u32>,
     sharp: RwSignal<bool>,
 ) -> impl IntoView {
+    let n_slides = Signal::derive(move || image_urls.get().len().max(1));
+    let current_url = Signal::derive(move || {
+        let urls = image_urls.get();
+        let i = slide_index.get().min(urls.len().saturating_sub(1));
+        urls.get(i).cloned().unwrap_or_default()
+    });
+
     let on_key = move |ev: KeyboardEvent| {
-        if ev.key() == "Escape" {
-            open.set(false);
+        if !open.get_untracked() {
+            return;
+        }
+        match ev.key().as_str() {
+            "Escape" => open.set(false),
+            "ArrowLeft" => {
+                let n = n_slides.get_untracked();
+                if n > 1 {
+                    slide_index.update(|i| *i = if *i == 0 { n - 1 } else { *i - 1 });
+                }
+            }
+            "ArrowRight" => {
+                let n = n_slides.get_untracked();
+                if n > 1 {
+                    slide_index.update(|i| *i = (*i + 1) % n);
+                }
+            }
+            _ => {}
         }
     };
 
     view! {
-        <Show when=move || open.get() && image_url.get().is_some()>
+        <Show when=move || open.get() && !image_urls.get().is_empty()>
             <div
                 class="lightbox"
                 role="dialog"
@@ -33,10 +56,40 @@ pub fn Lightbox(
                     <p class="lightbox-title">
                         {move || {
                             let t = image_title.get();
-                            if t.is_empty() { "Full image".into() } else { t }
+                            let n = n_slides.get();
+                            let i = slide_index.get() + 1;
+                            if t.is_empty() {
+                                if n > 1 { format!("Image {i}/{n}") } else { "Full image".into() }
+                            } else if n > 1 {
+                                format!("{t} ({i}/{n})")
+                            } else {
+                                t
+                            }
                         }}
                     </p>
                     <div class="lightbox-actions">
+                        <Show when=move || (n_slides.get() > 1)>
+                            <button
+                                type="button"
+                                class="btn btn-ghost lightbox-btn"
+                                on:click=move |_| {
+                                    let n = n_slides.get();
+                                    slide_index.update(|i| *i = if *i == 0 { n - 1 } else { *i - 1 });
+                                }
+                            >
+                                "‹ Prev"
+                            </button>
+                            <button
+                                type="button"
+                                class="btn btn-ghost lightbox-btn"
+                                on:click=move |_| {
+                                    let n = n_slides.get();
+                                    slide_index.update(|i| *i = (*i + 1) % n);
+                                }
+                            >
+                                "Next ›"
+                            </button>
+                        </Show>
                         <button
                             type="button"
                             class="btn btn-ghost lightbox-btn"
@@ -56,7 +109,7 @@ pub fn Lightbox(
                 <div class="lightbox-stage" on:click=move |ev| ev.stop_propagation()>
                     <img
                         class="lightbox-img"
-                        src=move || image_url.get().unwrap_or_default()
+                        src=move || current_url.get()
                         alt=move || image_title.get()
                         style=move || {
                             if sharp.get() {
