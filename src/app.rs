@@ -48,6 +48,8 @@ pub fn App() -> impl IntoView {
     let preload_busy = RwSignal::new(false);
     /// Bumped to cancel in-flight prefetch workers.
     let preload_gen = RwSignal::new(0u32);
+    /// Bumped to cancel in-flight foreground fetches (user switched sub mid-load).
+    let load_gen = RwSignal::new(0u32);
     const PRELOAD_TARGET: usize = 3;
     let slide_index = RwSignal::new(0usize);
     let load_status = RwSignal::new(String::new());
@@ -177,6 +179,14 @@ pub fn App() -> impl IntoView {
         }
     };
 
+    /// Abort in-flight foreground + background fetches (user switched away).
+    let cancel_in_flight = move || {
+        load_gen.update(|g| *g = g.wrapping_add(1));
+        preload_gen.update(|g| *g = g.wrapping_add(1));
+        preload_busy.set(false);
+        loading.set(false);
+    };
+
     /// One batched API wave fills missing queue slots (not 1 request per post).
     let fill_preload_queue = move || {
         if loading.get_untracked() || preload_busy.get_untracked() {
@@ -220,6 +230,14 @@ pub fn App() -> impl IntoView {
                     preload_busy.set(false);
                     return;
                 }
+                // Still the same sub the user wants?
+                let still = subreddit.get_untracked();
+                if normalize_subreddit(&still).as_deref() != normalize_subreddit(&raw).as_deref()
+                    && !still.eq_ignore_ascii_case(&raw)
+                {
+                    preload_busy.set(false);
+                    return;
+                }
                 for (live, window) in batch {
                     let dup = preload_queue.with_untracked(|q| {
                         q.iter()
@@ -240,12 +258,8 @@ pub fn App() -> impl IntoView {
         });
     };
 
-    /// Load next media. Always starts a fresh board run (Play / Next / Next game).
+    /// Load next media. Supersedes any in-flight fetch (user can switch mid-load).
     let load_media = move || {
-        if loading.get_untracked() {
-            return;
-        }
-
         let raw = subreddit.get_untracked();
         let want_sub = normalize_subreddit(&raw).unwrap_or_else(|| raw.trim().to_string());
         let avoid = load_session_seen_urls();
@@ -278,21 +292,34 @@ pub fn App() -> impl IntoView {
         preload_queue.set(queue);
 
         if let Some((img, window)) = taken {
+            // Cancel anything still downloading an old sub.
+            cancel_in_flight();
             apply_loaded_media(img, window, true);
             fill_preload_queue();
             return;
         }
 
-        // Full fetch — don't cancel fill workers that still match gen unless we bump.
-        // Bump gen so old fill workers stop, then start a foreground load.
+        // Supersede previous foreground + background work for the sub we're skipping.
+        let gen = load_gen.get_untracked().wrapping_add(1);
+        load_gen.set(gen);
         preload_gen.update(|g| *g = g.wrapping_add(1));
         preload_busy.set(false);
+        preload_queue.set(Vec::new());
 
         loading.set(true);
+        load_status.set(String::new());
+        let raw_owned = raw.clone();
         spawn_local(async move {
             let avoid = load_session_seen_urls();
             // Fetch current + extras for the queue in one efficient batch when possible.
-            match load_media_batch(&raw, &avoid, 1 + PRELOAD_TARGET).await {
+            let result = load_media_batch(&raw_owned, &avoid, 1 + PRELOAD_TARGET).await;
+
+            // Abandoned: user typed another sub / hit SFW / Next on something else.
+            if load_gen.get_untracked() != gen {
+                return;
+            }
+
+            match result {
                 Ok(mut batch) if !batch.is_empty() => {
                     let (first, window) = batch.remove(0);
                     apply_loaded_media(first, window, true);
@@ -306,15 +333,29 @@ pub fn App() -> impl IntoView {
                     }
                 }
                 Ok(_) => {
-                    // Empty batch — last resort single fetch path.
-                    match load_random_image(&raw, &avoid).await {
-                        Ok((img, window)) => apply_loaded_media(img, window, true),
-                        Err(e) => load_status.set(e.to_string()),
+                    match load_random_image(&raw_owned, &avoid).await {
+                        Ok((img, window)) => {
+                            if load_gen.get_untracked() != gen {
+                                return;
+                            }
+                            apply_loaded_media(img, window, true);
+                        }
+                        Err(e) => {
+                            if load_gen.get_untracked() == gen {
+                                load_status.set(e.to_string());
+                            }
+                        }
                     }
                 }
                 Err(e) => {
-                    load_status.set(e.to_string());
+                    if load_gen.get_untracked() == gen {
+                        load_status.set(e.to_string());
+                    }
                 }
+            }
+
+            if load_gen.get_untracked() != gen {
+                return;
             }
             loading.set(false);
             if image.get_untracked().is_some() {
@@ -328,6 +369,13 @@ pub fn App() -> impl IntoView {
         load_media();
     });
 
+    /// User is editing the sub field or skipping — abandon the fetch in progress.
+    let on_sub_edit = Callback::new(move |_: ()| {
+        cancel_in_flight();
+        preload_queue.set(Vec::new());
+        load_status.set(String::new());
+    });
+
     // Warm SFW + NSFW community decks once so random picks are instant.
     Effect::new(move |_| {
         spawn_local(async {
@@ -338,8 +386,7 @@ pub fn App() -> impl IntoView {
     let on_clear_image = Callback::new(move |_: ()| {
         image.set(None);
         preload_queue.set(Vec::new());
-        preload_gen.update(|g| *g = g.wrapping_add(1));
-        preload_busy.set(false);
+        cancel_in_flight();
         slide_index.set(0);
         lightbox_open.set(false);
         load_status.set(String::new());
@@ -402,6 +449,7 @@ pub fn App() -> impl IntoView {
                 status=load_status.into()
                 loading=loading.into()
                 on_play=on_play
+                on_sub_edit=on_sub_edit
                 has_image=has_image
             />
 

@@ -22,6 +22,8 @@ pub fn Chrome(
     loading: Signal<bool>,
     /// Reset board + load media for current sub (or start if empty).
     on_play: Callback<()>,
+    /// User is changing sub / skipping a slow fetch — abandon in-flight load.
+    on_sub_edit: Callback<()>,
     has_image: Signal<bool>,
 ) -> impl IntoView {
     let description = RwSignal::new(String::new());
@@ -59,9 +61,8 @@ pub fn Chrome(
     };
 
     let on_random_pool = move |p: SubredditPool| {
-        if loading.get_untracked() {
-            return;
-        }
+        // Always allow skip: cancel whatever is loading for the previous sub.
+        on_sub_edit.run(());
         pool.set(p);
         save_subreddit_pool(p);
         let current = subreddit.get_untracked();
@@ -169,18 +170,21 @@ pub fn Chrome(
                         class="subreddit-input chrome-input"
                         type="text"
                         prop:value=move || subreddit.get()
-                        prop:disabled=move || loading.get()
                         placeholder="pics"
                         maxlength="200"
                         autocomplete="off"
                         spellcheck="false"
                         on:input=move |ev| {
                             let v = event_target_value(&ev);
+                            // Typing abandons any in-flight fetch for the previous sub.
+                            on_sub_edit.run(());
                             subreddit.set(v.clone());
                             if let Some(b) = curated_blurb(&v) {
                                 description.set(b.to_string());
                             } else if v.trim().is_empty() {
                                 description.set(String::new());
+                            } else {
+                                description.set(format!("r/{v}"));
                             }
                         }
                         on:keydown=move |ev| {
@@ -193,7 +197,6 @@ pub fn Chrome(
                     <button
                         class="btn btn-primary-action"
                         type="button"
-                        prop:disabled=move || loading.get()
                         title=action_title
                         on:click=move |_| run_play()
                     >
@@ -202,8 +205,7 @@ pub fn Chrome(
                     <button
                         type="button"
                         class="btn btn-discover btn-discover-sfw"
-                        prop:disabled=move || loading.get()
-                        title="Surprise me with a random SFW subreddit"
+                        title="Surprise me with a random SFW subreddit (cancels current fetch)"
                         on:click=move |_| on_random_pool(SubredditPool::Sfw)
                     >
                         "SFW"
@@ -211,8 +213,7 @@ pub fn Chrome(
                     <button
                         type="button"
                         class="btn btn-discover btn-discover-nsfw"
-                        prop:disabled=move || loading.get()
-                        title="Surprise me with a random NSFW (18+) subreddit"
+                        title="Surprise me with a random NSFW (18+) subreddit (cancels current fetch)"
                         on:click=move |_| on_random_pool(SubredditPool::NsfwOnly)
                     >
                         "NSFW"
