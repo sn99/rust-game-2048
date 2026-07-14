@@ -23,6 +23,10 @@ pub struct RedditMedia {
     pub title: String,
     pub permalink: String,
     pub subreddit: String,
+    /// Reddit base36 post id (e.g. `1uuqpvt`), used to re-verify the post is still public.
+    pub id: String,
+    /// Score at fetch time (for ranking “top” within a window).
+    pub score: i64,
 }
 
 impl RedditMedia {
@@ -147,14 +151,17 @@ struct PostArrayResponse {
 
 #[derive(Debug, Deserialize)]
 struct PostData {
+    id: Option<String>,
     title: Option<String>,
     url: Option<String>,
     permalink: Option<String>,
     author: Option<String>,
     selftext: Option<String>,
+    score: Option<i64>,
     /// Set when mods/admins/reddit removed the post.
     removed_by_category: Option<String>,
     /// false ≈ removed from public listing / deleted for robots.
+    /// Must be true for us to link the post (CDN may still serve deleted posts’ files).
     is_robot_indexable: Option<bool>,
     #[allow(dead_code)]
     over_18: Option<bool>,
@@ -258,9 +265,17 @@ fn posts_to_media(posts: Vec<PostData>, subreddit: &str) -> Result<Vec<RedditMed
             continue;
         }
 
-        let permalink = p.permalink.unwrap_or_default();
+        let id = post_id_from(&p);
+        if id.is_empty() {
+            // Without an id we cannot re-verify the post page is still public.
+            continue;
+        }
+
+        let permalink = p.permalink.clone().unwrap_or_default();
         let permalink = if permalink.starts_with("http") {
             permalink
+        } else if permalink.is_empty() {
+            format!("https://www.reddit.com/r/{subreddit}/comments/{id}/")
         } else {
             format!("https://www.reddit.com{permalink}")
         };
@@ -269,8 +284,12 @@ fn posts_to_media(posts: Vec<PostData>, subreddit: &str) -> Result<Vec<RedditMed
             title: p.title.unwrap_or_default(),
             permalink,
             subreddit: subreddit.to_string(),
+            id,
+            score: p.score.unwrap_or(0),
         });
     }
+    // Highest score first so callers can take a true “top” slice.
+    out.sort_by(|a, b| b.score.cmp(&a.score));
     if out.is_empty() {
         Err(RedditError::NoImages)
     } else {
@@ -278,13 +297,34 @@ fn posts_to_media(posts: Vec<PostData>, subreddit: &str) -> Result<Vec<RedditMed
     }
 }
 
+fn post_id_from(p: &PostData) -> String {
+    if let Some(id) = p.id.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        // Strip t3_ prefix if present.
+        return id.strip_prefix("t3_").unwrap_or(id).to_string();
+    }
+    // Fallback: /r/sub/comments/<id>/...
+    if let Some(pl) = p.permalink.as_deref() {
+        let parts: Vec<&str> = pl.split('/').filter(|s| !s.is_empty()).collect();
+        // ["r", sub, "comments", id, ...]
+        if let Some(i) = parts.iter().position(|s| *s == "comments") {
+            if let Some(id) = parts.get(i + 1) {
+                if !id.is_empty() {
+                    return (*id).to_string();
+                }
+            }
+        }
+    }
+    String::new()
+}
 
+/// True if archive metadata says the Reddit post page is gone (CDN may still serve media).
 fn post_is_unavailable(p: &PostData) -> bool {
     // Arctic/Reddit mark removed posts this way (media CDN may still serve files).
     if p.removed_by_category.is_some() {
         return true;
     }
-    // Not indexable almost always means removed/spam/deleted for public view.
+    // Explicitly not indexable ⇒ post page is gone (CDN may still serve files).
+    // Missing field is allowed here and re-checked via post_still_public (Pullpush often omits it).
     if p.is_robot_indexable == Some(false) {
         return true;
     }
@@ -313,6 +353,56 @@ fn post_is_unavailable(p: &PostData) -> bool {
         }
     }
     false
+}
+
+/// Live-check fields on a raw JSON post (pre-serde).
+fn json_post_is_public(p: &serde_json::Value) -> bool {
+    // Any non-null removed_by_category ⇒ gone from Reddit UI.
+    match p.get("removed_by_category") {
+        None => {}
+        Some(v) if v.is_null() => {}
+        Some(_) => return false,
+    }
+    // Must be explicitly still indexable (CDN can outlive the post).
+    if p.get("is_robot_indexable").and_then(|v| v.as_bool()) != Some(true) {
+        return false;
+    }
+    if let Some(title) = p.get("title").and_then(|t| t.as_str()).map(str::trim) {
+        let tl = title.to_ascii_lowercase();
+        if matches!(
+            tl.as_str(),
+            "[deleted]" | "[removed]" | "deleted" | "removed" | "[removed by reddit]"
+        ) {
+            return false;
+        }
+    }
+    if let Some(author) = p.get("author").and_then(|a| a.as_str()) {
+        if author.eq_ignore_ascii_case("[deleted]") || author.eq_ignore_ascii_case("[removed]") {
+            return false;
+        }
+    }
+    true
+}
+
+fn json_post_id(p: &serde_json::Value) -> Option<String> {
+    if let Some(id) = p.get("id").and_then(|v| v.as_str()).map(str::trim).filter(|s| !s.is_empty()) {
+        return Some(id.strip_prefix("t3_").unwrap_or(id).to_string());
+    }
+    if let Some(pl) = p.get("permalink").and_then(|v| v.as_str()) {
+        let parts: Vec<&str> = pl.split('/').filter(|s| !s.is_empty()).collect();
+        if let Some(i) = parts.iter().position(|s| *s == "comments") {
+            if let Some(id) = parts.get(i + 1).copied().filter(|s| !s.is_empty()) {
+                return Some(id.to_string());
+            }
+        }
+    }
+    None
+}
+
+fn json_post_score(p: &serde_json::Value) -> i64 {
+    p.get("score")
+        .and_then(|v| v.as_i64().or_else(|| v.as_f64().map(|f| f as i64)))
+        .unwrap_or(0)
 }
 
 fn url_looks_deleted(url: &str) -> bool {
@@ -633,18 +723,21 @@ fn iso_utc_from_unix(secs: f64) -> String {
     )
 }
 
-/// Time windows: week → day → month → year → all-time (newest archive slice).
+/// Time windows: week → day → month → year → all-time.
+/// Each entry: (label, days_ago, max arctic pages, soft min score for “top”).
 #[cfg(target_arch = "wasm32")]
-fn time_windows() -> Vec<(&'static str, Option<i64>)> {
-    // (label, days_ago for `after`; None = no lower bound / all-time recent)
+fn time_windows() -> Vec<(&'static str, Option<i64>, usize, i64)> {
     vec![
-        ("top week", Some(7)),
-        ("top day", Some(1)),
-        ("top month", Some(30)),
-        ("top year", Some(365)),
-        ("top all-time", None),
+        ("top week", Some(7), 12, 50),
+        ("top day", Some(1), 5, 20),
+        ("top month", Some(30), 14, 100),
+        ("top year", Some(365), 14, 200),
+        ("top all-time", None, 10, 500),
     ]
 }
+
+/// How many highest-scoring public posts we randomize among (true “top” pool).
+const TOP_POOL_SIZE: usize = 35;
 
 #[cfg(target_arch = "wasm32")]
 thread_local! {
@@ -716,19 +809,21 @@ async fn fetch_text_with_opts(url: &str, min_gap_ms: f64) -> Result<String, Redd
         .map_err(|e| RedditError::Network(e.to_string()))
 }
 
-/// Fetch posts from Arctic Shift (CORS-friendly). `after`/`before` are ISO dates.
-/// Paginates a few pages, then ranks by score for a "top" feel.
+/// Fetch posts from Arctic Shift (CORS-friendly). Ranks by score client-side
+/// (API only supports time sort asc/desc).
 #[cfg(target_arch = "wasm32")]
 async fn fetch_arctic_window(
     subreddit: &str,
     after_days: Option<i64>,
     max_pages: usize,
+    soft_min_score: i64,
 ) -> Result<Vec<serde_json::Value>, RedditError> {
     let after = after_days.map(iso_utc_days_ago);
     let mut before = iso_utc_days_ago(-1); // tomorrow (inclusive upper bound)
     let mut all: Vec<serde_json::Value> = Vec::new();
+    let mut seen_ids = HashSet::new();
 
-    for _ in 0..max_pages {
+    for page in 0..max_pages {
         let mut url = format!(
             "https://arctic-shift.photon-reddit.com/api/posts/search?subreddit={subreddit}&limit=100&sort=desc"
         );
@@ -737,7 +832,7 @@ async fn fetch_arctic_window(
         }
         url.push_str(&format!("&before={before}"));
 
-        let text = fetch_text_with_opts(&url, 800.0).await?;
+        let text = fetch_text_with_opts(&url, 700.0).await?;
         let v: serde_json::Value =
             serde_json::from_str(&text).map_err(|e| RedditError::Parse(e.to_string()))?;
         let Some(arr) = v.get("data").and_then(|d| d.as_array()) else {
@@ -751,7 +846,23 @@ async fn fetch_arctic_window(
             if let Some(c) = p.get("created_utc").and_then(|x| x.as_f64()) {
                 oldest = oldest.min(c);
             }
-            all.push(p.clone());
+            if let Some(id) = json_post_id(p) {
+                if !seen_ids.insert(id) {
+                    continue;
+                }
+            }
+            // Drop known-removed early to keep memory/scoring clean.
+            if json_post_is_public(p) {
+                all.push(p.clone());
+            }
+        }
+        // Early stop once we have a solid high-score public pool.
+        let high = all
+            .iter()
+            .filter(|p| json_post_score(p) >= soft_min_score)
+            .count();
+        if high >= TOP_POOL_SIZE && page + 1 >= 2 {
+            break;
         }
         if oldest == f64::MAX || arr.len() < 50 {
             break;
@@ -763,16 +874,12 @@ async fn fetch_arctic_window(
         before = next_before;
     }
 
-    // Rank by score descending (client-side "top")
-    all.sort_by(|a, b| {
-        let sa = a.get("score").and_then(|x| x.as_i64()).unwrap_or(0);
-        let sb = b.get("score").and_then(|x| x.as_i64()).unwrap_or(0);
-        sb.cmp(&sa)
-    });
+    // Rank by score descending (client-side true “top of sampled window”)
+    all.sort_by(|a, b| json_post_score(b).cmp(&json_post_score(a)));
     Ok(all)
 }
 
-/// Optional Pullpush one-shot (often 429) — last resort only.
+/// Pullpush score-sorted (true top-of-window). Often 429 — use sparingly.
 #[cfg(target_arch = "wasm32")]
 async fn fetch_pullpush_window(
     subreddit: &str,
@@ -786,14 +893,26 @@ async fn fetch_pullpush_window(
         let since = now.saturating_sub((days as u64).saturating_mul(86_400));
         url.push_str(&format!("&since={since}"));
     }
-    let text = fetch_text_with_opts(&url, 3_000.0).await?;
+    let text = fetch_text_with_opts(&url, 3_500.0).await?;
     let v: serde_json::Value =
         serde_json::from_str(&text).map_err(|e| RedditError::Parse(e.to_string()))?;
-    let arr = v
+    let mut arr = v
         .get("data")
         .and_then(|d| d.as_array())
         .cloned()
         .unwrap_or_default();
+    // Pullpush is already score-sorted; keep only still-public when fields exist.
+    arr.retain(|p| {
+        // If removal fields are absent, keep and re-verify via Arctic ids later.
+        match p.get("removed_by_category") {
+            Some(v) if !v.is_null() => return false,
+            _ => {}
+        }
+        match p.get("is_robot_indexable") {
+            Some(v) if v.as_bool() == Some(false) => return false,
+            _ => true,
+        }
+    });
     Ok(arr)
 }
 
@@ -809,6 +928,7 @@ pub fn media_seen_in_session(media: &RedditMedia, seen: &[String]) -> bool {
         .items
         .iter()
         .any(|item| seen.iter().any(|s| s == &item.url))
+        || (!media.id.is_empty() && seen.iter().any(|s| s == &media.id || s.ends_with(&format!("/{}", media.id))))
 }
 
 pub async fn load_random_image(
@@ -819,7 +939,9 @@ pub async fn load_random_image(
     load_random_image_for_sub(&sub, avoid_urls).await
 }
 
-/// Arctic-first (CORS OK). Avoids reddit.com (browser 403) and spamming Pullpush (429).
+/// Per window (week→day→month→year→all): try score-sorted Pullpush once, else
+/// multi-page Arctic + client score rank. Only pick from the top pool; re-verify
+/// post is still public before accepting CDN media.
 pub async fn load_random_image_for_sub(
     sub: &str,
     avoid_urls: &[String],
@@ -828,25 +950,29 @@ pub async fn load_random_image_for_sub(
     {
         let mut last_err = RedditError::NoImages;
 
-        // Prefer Arctic Shift (CORS + reliable). Do NOT call reddit.com from the page
-        // (always 403). Avoid spamming Pullpush (429) — use it once as last resort.
-        for (label, days) in time_windows() {
-            match fetch_arctic_window(sub, days, 3).await {
-                Ok(posts) => match try_pick_live_from_posts(posts, sub, avoid_urls).await {
+        for (label, days, max_pages, soft_min) in time_windows() {
+            // 1) True score-sorted top from Pullpush (when not rate-limited).
+            if BACKOFF_UNTIL_MS.with(|c| c.get()) <= now_ms() {
+                match fetch_pullpush_window(sub, days).await {
+                    Ok(posts) if !posts.is_empty() => {
+                        match try_pick_live_from_posts(posts, sub, avoid_urls, soft_min).await {
+                            Ok(media) => return Ok((media, label)),
+                            Err(e) => last_err = e,
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(e) => last_err = e,
+                }
+            }
+
+            // 2) Arctic multi-page sample + client score ranking.
+            match fetch_arctic_window(sub, days, max_pages, soft_min).await {
+                Ok(posts) => match try_pick_live_from_posts(posts, sub, avoid_urls, soft_min).await {
                     Ok(media) => return Ok((media, label)),
                     Err(e) => last_err = e,
                 },
                 Err(e) => last_err = e,
             }
-        }
-
-        // Single Pullpush all-time attempt if Arctic yielded nothing usable.
-        match fetch_pullpush_window(sub, None).await {
-            Ok(posts) => match try_pick_live_from_posts(posts, sub, avoid_urls).await {
-                Ok(media) => return Ok((media, "top all-time")),
-                Err(e) => last_err = e,
-            },
-            Err(e) => last_err = e,
         }
         Err(last_err)
     }
@@ -857,24 +983,52 @@ pub async fn load_random_image_for_sub(
     }
 }
 
+/// Pick a random post among the highest-scoring unused public posts whose media still loads.
 async fn try_pick_live_from_posts(
     posts: Vec<serde_json::Value>,
     sub: &str,
     avoid_urls: &[String],
+    soft_min_score: i64,
 ) -> Result<RedditMedia, RedditError> {
     let mut media_list = posts_json_to_media(posts, sub)?;
     media_list.retain(|m| !media_seen_in_session(m, avoid_urls));
     if media_list.is_empty() {
         return Err(RedditError::NoImages);
     }
-    // Shuffle
-    for i in (1..media_list.len()).rev() {
-        let j = fastrand::usize(..=i);
-        media_list.swap(i, j);
+    // Already score-sorted from posts_to_media; prefer posts above soft min.
+    let high: Vec<RedditMedia> = media_list
+        .iter()
+        .filter(|m| m.score >= soft_min_score)
+        .cloned()
+        .collect();
+    let ranked = if high.len() >= 5 {
+        high
+    } else {
+        media_list
+    };
+
+    // ONLY randomize inside the top pool — never treat low-score filler as “top”.
+    let mut pool: Vec<RedditMedia> = ranked.into_iter().take(TOP_POOL_SIZE).collect();
+    if pool.is_empty() {
+        return Err(RedditError::NoImages);
     }
+
+    // One batch re-verify: drop anything Arctic now marks removed (CDN may still load).
+    let ids: Vec<String> = pool.iter().map(|m| m.id.clone()).collect();
+    let public_ids = reverify_public_ids(&ids).await;
+    pool.retain(|m| public_ids.contains(&m.id));
+    if pool.is_empty() {
+        return Err(RedditError::NoImages);
+    }
+
+    for i in (1..pool.len()).rev() {
+        let j = fastrand::usize(..=i);
+        pool.swap(i, j);
+    }
+
     let mut attempts = 0usize;
-    for candidate in media_list {
-        if attempts >= 20 {
+    for candidate in pool {
+        if attempts >= 25 {
             break;
         }
         attempts += 1;
@@ -890,11 +1044,46 @@ async fn try_pick_live_from_posts(
     Err(RedditError::NoImages)
 }
 
+/// Batch re-fetch posts by id; return only ids that are still public on Reddit.
+#[cfg(target_arch = "wasm32")]
+async fn reverify_public_ids(ids: &[String]) -> HashSet<String> {
+    let mut out = HashSet::new();
+    if ids.is_empty() {
+        return out;
+    }
+    // Arctic accepts comma-separated ids; keep batches modest.
+    for chunk in ids.chunks(25) {
+        let joined = chunk.join(",");
+        let url = format!("https://arctic-shift.photon-reddit.com/api/posts/ids?ids={joined}");
+        let Ok(text) = fetch_text_with_opts(&url, 500.0).await else {
+            // Conservative: if re-check fails, don't accept any of this chunk
+            // (avoids linking deleted posts when metadata is unavailable).
+            continue;
+        };
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) else {
+            continue;
+        };
+        let Some(arr) = v.get("data").and_then(|d| d.as_array()) else {
+            continue;
+        };
+        for p in arr {
+            if json_post_is_public(p) {
+                if let Some(id) = json_post_id(p) {
+                    out.insert(id);
+                }
+            }
+        }
+    }
+    out
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+async fn reverify_public_ids(ids: &[String]) -> HashSet<String> {
+    ids.iter().cloned().collect()
+}
+
 /// Keep only media that still loads (filters Reddit-deleted files).
 pub async fn filter_live_media(media: RedditMedia) -> Option<RedditMedia> {
-    if media.items.iter().any(|i| url_looks_deleted(&i.url)) {
-        // Any tombstone URL → reject whole post (partial galleries are rebuilt below).
-    }
     let mut live = Vec::with_capacity(media.items.len());
     for item in media.items {
         if url_looks_deleted(&item.url) {
@@ -912,6 +1101,8 @@ pub async fn filter_live_media(media: RedditMedia) -> Option<RedditMedia> {
             title: media.title,
             permalink: media.permalink,
             subreddit: media.subreddit,
+            id: media.id,
+            score: media.score,
         })
     }
 }
@@ -1096,16 +1287,22 @@ mod tests {
         let json = r#"{
           "data": [
             {
+              "id": "aaa111",
               "title": "Single",
               "url": "https://i.redd.it/top.jpg",
-              "permalink": "/r/pics/comments/1/top/",
+              "permalink": "/r/pics/comments/aaa111/top/",
+              "score": 500,
+              "is_robot_indexable": true,
               "is_video": false,
               "post_hint": "image"
             },
             {
+              "id": "bbb222",
               "title": "Vid",
               "url": "https://v.redd.it/abc",
-              "permalink": "/r/pics/comments/2/v/",
+              "permalink": "/r/pics/comments/bbb222/v/",
+              "score": 400,
+              "is_robot_indexable": true,
               "is_video": true,
               "media": {
                 "reddit_video": {
@@ -1118,9 +1315,12 @@ mod tests {
               }
             },
             {
+              "id": "ccc333",
               "title": "Gallery",
               "url": "https://www.reddit.com/gallery/xyz",
-              "permalink": "/r/pics/comments/3/g/",
+              "permalink": "/r/pics/comments/ccc333/g/",
+              "score": 300,
+              "is_robot_indexable": true,
               "is_gallery": true,
               "gallery_data": { "items": [ { "media_id": "aaa" }, { "media_id": "bbb" } ] },
               "media_metadata": {
@@ -1132,7 +1332,10 @@ mod tests {
         }"#;
         let items = extract_images(json, "pics").unwrap();
         assert_eq!(items.len(), 3);
+        // Score-ranked: 500, 400, 300
         assert_eq!(items[0].items[0].kind, MediaKind::Image);
+        assert_eq!(items[0].id, "aaa111");
+        assert_eq!(items[0].score, 500);
         assert_eq!(items[1].items[0].kind, MediaKind::Video);
         assert!(items[1].items[0].url.contains("DASH_480"));
         assert_eq!(items[2].items.len(), 2);
@@ -1150,24 +1353,31 @@ mod tests {
         let json = r#"{
           "data": [
             {
+              "id": "dead1",
               "title": "[deleted]",
               "url": "https://i.redd.it/x.jpg",
-              "permalink": "/r/pics/comments/1/",
+              "permalink": "/r/pics/comments/dead1/",
               "author": "[deleted]",
-              "removed_by_category": "moderator"
+              "removed_by_category": "moderator",
+              "is_robot_indexable": false,
+              "score": 9999
             },
             {
+              "id": "live2",
               "title": "Alive",
               "url": "https://i.redd.it/ok.jpg",
-              "permalink": "/r/pics/comments/2/",
+              "permalink": "/r/pics/comments/live2/",
               "author": "someone",
-              "post_hint": "image"
+              "post_hint": "image",
+              "is_robot_indexable": true,
+              "score": 10
             }
           ]
         }"#;
         let items = extract_images(json, "pics").unwrap();
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].primary_url(), "https://i.redd.it/ok.jpg");
+        assert_eq!(items[0].id, "live2");
     }
 
     #[test]
@@ -1175,21 +1385,25 @@ mod tests {
         let json = r#"{
           "data": [
             {
+              "id": "gone",
               "title": "Removed but CDN has file",
               "url": "https://i.redd.it/x.jpg",
-              "permalink": "/r/pics/comments/1/",
+              "permalink": "/r/pics/comments/gone/",
               "author": "someone",
               "removed_by_category": "moderator",
               "is_robot_indexable": false,
-              "post_hint": "image"
+              "post_hint": "image",
+              "score": 5000
             },
             {
+              "id": "live",
               "title": "Live",
               "url": "https://i.redd.it/ok.jpg",
-              "permalink": "/r/pics/comments/2/",
+              "permalink": "/r/pics/comments/live/",
               "author": "someone",
               "is_robot_indexable": true,
-              "post_hint": "image"
+              "post_hint": "image",
+              "score": 100
             }
           ]
         }"#;
@@ -1203,17 +1417,19 @@ mod tests {
         let json = r#"{
           "data": [
             {
+              "id": "yt1",
               "title": "YT",
               "url": "https://youtube.com/watch?v=abc",
-              "permalink": "/r/pics/comments/1/",
+              "permalink": "/r/pics/comments/yt1/",
               "is_video": false,
               "post_hint": "rich:video",
               "is_robot_indexable": true
             },
             {
+              "id": "v1",
               "title": "v.redd.it no media object",
               "url": "https://v.redd.it/abc",
-              "permalink": "/r/pics/comments/2/",
+              "permalink": "/r/pics/comments/v1/",
               "is_video": true,
               "is_robot_indexable": true
             }
@@ -1221,6 +1437,58 @@ mod tests {
         }"#;
         let err = extract_images(json, "pics").unwrap_err();
         assert!(matches!(err, RedditError::NoImages));
+    }
+
+    #[test]
+    fn ranks_by_score_descending() {
+        let json = r#"{
+          "data": [
+            {
+              "id": "low",
+              "title": "Low",
+              "url": "https://i.redd.it/low.jpg",
+              "permalink": "/r/pics/comments/low/",
+              "is_robot_indexable": true,
+              "score": 3
+            },
+            {
+              "id": "high",
+              "title": "High",
+              "url": "https://i.redd.it/high.jpg",
+              "permalink": "/r/pics/comments/high/",
+              "is_robot_indexable": true,
+              "score": 9000
+            }
+          ]
+        }"#;
+        let items = extract_images(json, "pics").unwrap();
+        assert_eq!(items[0].id, "high");
+        assert_eq!(items[1].id, "low");
+    }
+
+    #[test]
+    fn json_public_requires_robot_true() {
+        let live = serde_json::json!({
+            "id": "x",
+            "title": "Ok",
+            "is_robot_indexable": true,
+            "removed_by_category": null
+        });
+        let dead = serde_json::json!({
+            "id": "y",
+            "title": "Nope",
+            "is_robot_indexable": false,
+            "removed_by_category": null
+        });
+        let removed = serde_json::json!({
+            "id": "z",
+            "title": "Nope",
+            "is_robot_indexable": true,
+            "removed_by_category": "moderator"
+        });
+        assert!(json_post_is_public(&live));
+        assert!(!json_post_is_public(&dead));
+        assert!(!json_post_is_public(&removed));
     }
 
 }
