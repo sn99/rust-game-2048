@@ -175,9 +175,14 @@ pub fn App() -> impl IntoView {
         }
     };
 
-    /// Prefetch next post immediately in the background (no artificial delay).
+    /// Background-fetch the *next* post while the user plays the current one.
+    /// Fully verifies media so Next can apply instantly.
     let start_preload = move || {
         if preloaded.get_untracked().is_some() || preload_busy.get_untracked() {
+            return;
+        }
+        // Never compete with a foreground load.
+        if loading.get_untracked() {
             return;
         }
         let raw = subreddit.get_untracked();
@@ -193,34 +198,65 @@ pub fn App() -> impl IntoView {
                 preload_busy.set(false);
                 return;
             }
-            if preloaded.get_untracked().is_some() || loading.get_untracked() {
-                preload_busy.set(false);
-                return;
-            }
+
             let mut avoid = load_session_seen_urls();
             if let Some(cur) = image.get_untracked() {
                 for it in &cur.items {
                     avoid.push(it.url.clone());
                 }
             }
-            match load_random_image(&raw, &avoid).await {
+            // Also avoid whatever is already staged (shouldn't exist, but be safe).
+            if let Some((p, _)) = preloaded.get_untracked() {
+                for it in &p.items {
+                    avoid.push(it.url.clone());
+                }
+            }
+
+            let result = load_random_image(&raw, &avoid).await;
+            if preload_gen.get_untracked() != gen {
+                preload_busy.set(false);
+                return;
+            }
+
+            match result {
                 Ok((img, window)) => {
+                    // Verify + probe while the user is still playing so Next is instant.
                     if preload_gen.get_untracked() != gen {
                         preload_busy.set(false);
                         return;
                     }
-                    warm_media_cache(&img);
-                    preloaded.set(Some((img, window)));
+                    if !post_is_still_public(&img.id).await {
+                        preload_busy.set(false);
+                        return;
+                    }
+                    if preload_gen.get_untracked() != gen {
+                        preload_busy.set(false);
+                        return;
+                    }
+                    let Some(live) = filter_live_media(img).await else {
+                        preload_busy.set(false);
+                        return;
+                    };
+                    if preload_gen.get_untracked() != gen {
+                        preload_busy.set(false);
+                        return;
+                    }
+                    if media_seen_in_session(&live, &load_session_seen_urls()) {
+                        preload_busy.set(false);
+                        return;
+                    }
+                    warm_media_cache(&live);
+                    preloaded.set(Some((live, window)));
                 }
                 Err(_) => {
-                    // Silent background failure (e.g. 429).
+                    // Silent (rate limits, no media). User can still Next with a full fetch.
                 }
             }
             preload_busy.set(false);
         });
     };
 
-    /// Load next media. `reset_board`: true for New image; false for Keep going.
+    /// Load next media. `reset_board`: true for Play/Next; false for Keep going.
     let load_media = move |reset_board: bool| {
         if loading.get_untracked() {
             return;
@@ -228,28 +264,43 @@ pub fn App() -> impl IntoView {
 
         let raw = subreddit.get_untracked();
         let want_sub = normalize_subreddit(&raw).unwrap_or_else(|| raw.trim().to_string());
+
+        // Instant path: use ready prefetched post (already verified + warmed).
+        let avoid = load_session_seen_urls();
+        if let Some((img, window)) = preloaded.get_untracked() {
+            let pre_sub =
+                normalize_subreddit(&img.subreddit).unwrap_or_else(|| img.subreddit.clone());
+            if !want_sub.is_empty()
+                && pre_sub.eq_ignore_ascii_case(&want_sub)
+                && !media_seen_in_session(&img, &avoid)
+            {
+                preloaded.set(None);
+                // Cancel any in-flight prefetch for the previous slot.
+                preload_gen.update(|g| *g = g.wrapping_add(1));
+                preload_busy.set(false);
+                apply_loaded_media(img, window, reset_board);
+                // Kick next prefetch only after foreground loading flag is clear.
+                start_preload();
+                return;
+            }
+            // Wrong sub / already seen — drop and fetch fresh.
+            preloaded.set(None);
+        }
+
+        // Cancel background work; we're doing a full fetch now.
+        preload_gen.update(|g| *g = g.wrapping_add(1));
+        preload_busy.set(false);
+
         loading.set(true);
-        // Keep prior success status visible; overlay already says "Loading media…".
-        // Do not set long intermediate strings like week→day→month search paths.
 
         spawn_local(async move {
-            let mut avoid = load_session_seen_urls();
-
-            if let Some((img, window)) = preloaded.get_untracked() {
-                // Only use a prefetch that matches the sub the user currently wants.
-                let pre_sub = normalize_subreddit(&img.subreddit)
-                    .unwrap_or_else(|| img.subreddit.clone());
-                if !want_sub.is_empty()
-                    && pre_sub.eq_ignore_ascii_case(&want_sub)
-                    && !media_seen_in_session(&img, &avoid)
-                {
-                    preloaded.set(None);
-                    // Re-check post page still public (prefetch may be minutes old).
+            let avoid = load_session_seen_urls();
+            match load_random_image(&raw, &avoid).await {
+                Ok((img, window)) => {
+                    // Foreground: still verify once so we never apply a deleted post.
                     if post_is_still_public(&img.id).await {
                         if let Some(live) = filter_live_media(img).await {
-                            if !media_seen_in_session(&live, &avoid)
-                                && post_is_still_public(&live.id).await
-                            {
+                            if !media_seen_in_session(&live, &load_session_seen_urls()) {
                                 apply_loaded_media(live, window, reset_board);
                                 loading.set(false);
                                 start_preload();
@@ -257,23 +308,28 @@ pub fn App() -> impl IntoView {
                             }
                         }
                     }
-                } else {
-                    // Stale prefetch for another sub — drop it.
-                    preloaded.set(None);
-                }
-            }
-
-            avoid = load_session_seen_urls();
-            match load_random_image(&raw, &avoid).await {
-                Ok((img, window)) => {
-                    apply_loaded_media(img, window, reset_board);
-                    start_preload();
+                    // Fallback if verify failed: try one more full search.
+                    let avoid = load_session_seen_urls();
+                    match load_random_image(&raw, &avoid).await {
+                        Ok((img2, window2)) => {
+                            if let Some(live) = filter_live_media(img2).await {
+                                apply_loaded_media(live, window2, reset_board);
+                            } else {
+                                load_status.set("Could not load playable media".into());
+                            }
+                        }
+                        Err(e) => load_status.set(e.to_string()),
+                    }
                 }
                 Err(e) => {
                     load_status.set(e.to_string());
                 }
             }
             loading.set(false);
+            // Always try to stage the following post after a successful or failed settle.
+            if image.get_untracked().is_some() {
+                start_preload();
+            }
         });
     };
 
@@ -302,7 +358,10 @@ pub fn App() -> impl IntoView {
         reveal_from.set(2);
         reveal_to.set(g);
         lightbox_sharp.set(false);
-        // Do NOT fetch a new post or change the subreddit.
+        // Keep staging the following post while they play this board again.
+        if image.get_untracked().is_some() {
+            start_preload();
+        }
     });
 
     let on_clear_image = Callback::new(move |_: ()| {
