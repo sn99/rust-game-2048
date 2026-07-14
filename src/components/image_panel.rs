@@ -6,6 +6,7 @@ use leptos::prelude::*;
 pub fn ImagePanel(
     image_url: Signal<Option<String>>,
     image_title: Signal<String>,
+    image_permalink: Signal<Option<String>>,
     max_tile: Signal<u32>,
     win_tile: Signal<u32>,
     reveal_pct: Signal<u32>,
@@ -16,20 +17,30 @@ pub fn ImagePanel(
         <Show when=move || image_url.get().is_some()>
             <section class="panel image-panel">
                 <div class="image-panel-head">
-                    <div>
+                    <div class="image-panel-copy">
                         <h2 class="panel-title">"Reveal"</h2>
                         <p class="image-panel-meta">
                             {move || {
                                 let t = image_title.get();
                                 if t.is_empty() {
                                     "Background image".into()
-                                } else if t.len() > 72 {
-                                    format!("{}…", &t[..69])
+                                } else if t.len() > 64 {
+                                    format!("{}…", &t[..61])
                                 } else {
                                     t
                                 }
                             }}
                         </p>
+                        <Show when=move || image_permalink.get().is_some()>
+                            <a
+                                class="reddit-post-link"
+                                href=move || image_permalink.get().unwrap_or_default()
+                                target="_blank"
+                                rel="noopener noreferrer"
+                            >
+                                "Open Reddit post ↗"
+                            </a>
+                        </Show>
                     </div>
                     <div class="image-panel-actions">
                         <button
@@ -81,7 +92,7 @@ pub fn ImagePanel(
                 <p class="image-panel-hint">
                     {move || {
                         format!(
-                            "Unblurs fully at {} · now {}% clear",
+                            "Clears at {} · {}% revealed",
                             win_tile.get(),
                             reveal_pct.get()
                         )

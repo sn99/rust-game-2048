@@ -10,7 +10,8 @@ use crate::input::{
 use crate::progress::reveal_progress;
 use crate::reddit::{load_random_image, RedditImage};
 use crate::storage::{
-    load_best, load_goal, load_subreddit, save_best, save_goal, save_subreddit,
+    load_best, load_goal, load_recent_image_urls, load_subreddit, push_recent_image_url, save_best,
+    save_goal, save_subreddit,
 };
 use leptos::prelude::*;
 use wasm_bindgen::closure::Closure;
@@ -46,7 +47,9 @@ pub fn App() -> impl IntoView {
     let max_tile = Signal::derive(move || board.get().max_tile());
     let win_tile = Signal::derive(move || goal.get());
     let image_url = Signal::derive(move || image.get().map(|i| i.url.clone()));
-    let image_title = Signal::derive(move || image.get().map(|i| i.title.clone()).unwrap_or_default());
+    let image_title =
+        Signal::derive(move || image.get().map(|i| i.title.clone()).unwrap_or_default());
+    let image_permalink = Signal::derive(move || image.get().map(|i| i.permalink.clone()));
     let has_image = Signal::derive(move || image.get().is_some());
     let reveal_pct = Signal::derive(move || {
         (reveal_progress(max_tile.get(), goal.get()) * 100.0).round() as u32
@@ -119,25 +122,30 @@ pub fn App() -> impl IntoView {
         }
         let raw = subreddit.get_untracked();
         loading.set(true);
-        load_status.set("Fetching top posts…".into());
+        load_status.set("Searching top week → day → month…".into());
         spawn_local(async move {
-            match load_random_image(&raw).await {
-                Ok(img) => {
+            let avoid = load_recent_image_urls();
+            match load_random_image(&raw, &avoid).await {
+                Ok((img, window)) => {
                     save_subreddit(&img.subreddit);
                     subreddit.set(img.subreddit.clone());
-                    let msg = if img.title.is_empty() {
-                        format!("Loaded from r/{}", img.subreddit)
+                    push_recent_image_url(&img.url);
+                    let title_bit = if img.title.is_empty() {
+                        String::new()
                     } else {
-                        let title = if img.title.len() > 80 {
-                            format!("{}…", &img.title[..77])
+                        let t = if img.title.len() > 60 {
+                            format!("{}…", &img.title[..57])
                         } else {
                             img.title.clone()
                         };
-                        format!("r/{} — {}", img.subreddit, title)
+                        format!(" — {t}")
                     };
+                    load_status.set(format!(
+                        "r/{} · {}{}",
+                        img.subreddit, window, title_bit
+                    ));
                     image.set(Some(img));
                     lightbox_sharp.set(false);
-                    load_status.set(msg);
                 }
                 Err(e) => {
                     load_status.set(e.to_string());
@@ -202,7 +210,6 @@ pub fn App() -> impl IntoView {
             <DifficultyBar target=win_tile on_select=on_select_goal />
 
             <div class="play-layout">
-                // Game column (first in DOM = top on mobile)
                 <section class="play-game">
                     <div
                         class="board-wrap"
@@ -218,13 +225,8 @@ pub fn App() -> impl IntoView {
                             on_try_again=new_game
                         />
                     </div>
-                    <p class="how-to panel panel-quiet how-to-desktop-hide">
-                        <strong>"How to play: "</strong>
-                        "Arrow keys or swipe. Matching tiles merge. Pick a goal to set when you win and when the photo clears."
-                    </p>
                 </section>
 
-                // Image + subreddit (side panel on desktop)
                 <aside class="play-media">
                     <SubredditBar
                         subreddit=subreddit
@@ -236,21 +238,17 @@ pub fn App() -> impl IntoView {
                     <ImagePanel
                         image_url=image_url
                         image_title=image_title
+                        image_permalink=image_permalink
                         max_tile=max_tile
                         win_tile=win_tile
                         reveal_pct=reveal_pct
                         on_open_full=on_open_full
                         on_clear=on_clear_image
                     />
-                    <p class="how-to panel panel-quiet how-to-mobile-hide">
-                        <strong>"How to play: "</strong>
-                        "Arrow keys or swipe to move. Matching tiles merge. "
-                        "Easier goals clear the photo sooner. Images stay fully framed (no crop)."
-                    </p>
                 </aside>
             </div>
 
-            <p class="credit">
+            <p class="credit desktop-hide-credit">
                 "Built with Rust + Leptos · Inspired by "
                 <a href="https://play2048.co/" target="_blank" rel="noopener noreferrer">
                     "2048 by Gabriele Cirulli"

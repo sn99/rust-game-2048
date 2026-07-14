@@ -95,3 +95,43 @@ pub fn save_goal(goal: u32) {
         let _ = goal;
     }
 }
+
+#[cfg(target_arch = "wasm32")]
+const RECENT_IMAGES_KEY: &str = "rust-game-2048-recent-images";
+#[cfg(target_arch = "wasm32")]
+const RECENT_IMAGES_MAX: usize = 40;
+
+/// Recently shown image URLs (avoid repeats).
+pub fn load_recent_image_urls() -> Vec<String> {
+    #[cfg(target_arch = "wasm32")]
+    {
+        web_sys::window()
+            .and_then(|w| w.local_storage().ok().flatten())
+            .and_then(|s| s.get_item(RECENT_IMAGES_KEY).ok().flatten())
+            .and_then(|raw| serde_json::from_str(&raw).ok())
+            .unwrap_or_default()
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        Vec::new()
+    }
+}
+
+pub fn push_recent_image_url(url: &str) {
+    #[cfg(target_arch = "wasm32")]
+    {
+        let mut list = load_recent_image_urls();
+        list.retain(|u| u != url);
+        list.insert(0, url.to_string());
+        list.truncate(RECENT_IMAGES_MAX);
+        if let Some(storage) = web_sys::window().and_then(|w| w.local_storage().ok().flatten()) {
+            if let Ok(raw) = serde_json::to_string(&list) {
+                let _ = storage.set_item(RECENT_IMAGES_KEY, &raw);
+            }
+        }
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let _ = url;
+    }
+}

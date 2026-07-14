@@ -1178,6 +1178,7 @@ dependencies = [
  "console_error_panic_hook",
  "fastrand",
  "gloo-net",
+ "js-sys",
  "leptos",
  "serde",
  "serde_json",

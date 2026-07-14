@@ -121,8 +121,9 @@ body {
 .header-top {
   display: flex;
   justify-content: space-between;
-  align-items: flex-start;
-  gap: 12px;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
 }
 
 .brand {
@@ -368,6 +369,7 @@ body {
   width: 100%;
   min-height: 160px;
   max-height: min(38vh, 320px);
+  /* flex:1 applied on desktop */
   border-radius: 10px;
   background:
     linear-gradient(45deg, #e8dfd0 25%, transparent 25%),
@@ -660,6 +662,48 @@ body {
   font-weight: 700;
 }
 
+
+/* Compact chrome */
+.compact-panel {
+  padding: 8px 12px;
+}
+
+.compact-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.inline-title {
+  margin: 0;
+  flex-shrink: 0;
+}
+
+.reddit-post-link {
+  display: inline-block;
+  margin-top: 4px;
+  font-size: 13px;
+  font-weight: 700;
+  color: #c15b3f;
+  text-decoration: none;
+}
+
+.reddit-post-link:hover {
+  text-decoration: underline;
+}
+
+.image-panel {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+
+.image-panel-copy {
+  min-width: 0;
+}
+
 /* Ambient full-page background — contain, no crop */
 .reveal-bg {
   position: fixed;
@@ -773,75 +817,170 @@ body {
 }
 
 
-/* —— Desktop / wide tablet: game | image side by side —— */
+/* —— Desktop: one-screen, no scroll —— */
 @media (min-width: 900px) {
+  html,
+  body {
+    height: 100%;
+    overflow: hidden;
+  }
+
   :root {
-    --app-width: min(1120px, 96vw);
-    --board-size: min(440px, 42vw);
+    --app-width: min(1180px, 98vw);
+    /* Board fits viewport: leave room for header + goals */
+    --board-size: min(420px, calc(100dvh - 150px), 46vw);
     --cell: calc((var(--board-size) - var(--gap) * 5) / 4);
-    --play-gap: 20px;
+    --play-gap: 14px;
   }
 
   .app {
-    padding: 24px 20px 56px;
-    gap: 14px;
+    height: 100dvh;
+    max-height: 100dvh;
+    padding: 10px 14px 8px;
+    gap: 8px;
+    overflow: hidden;
+    box-sizing: border-box;
   }
 
-  .play-layout {
-    display: grid;
-    grid-template-columns: auto minmax(300px, 1fr);
-    gap: var(--play-gap);
-    align-items: start;
-  }
-
-  .play-game {
-    align-items: stretch;
-    position: sticky;
-    top: 16px;
-  }
-
-  .play-media {
-    /* Sticky image column so scrolling long titles keeps photo visible */
-    position: sticky;
-    top: 16px;
-    max-height: calc(100vh - 32px);
-    overflow: auto;
-    padding-right: 2px;
-  }
-
-  .how-to-desktop-hide {
-    display: none;
-  }
-
-  .how-to-mobile-hide {
-    display: block;
-  }
-
-  .image-frame {
-    min-height: 220px;
-    max-height: min(58vh, 520px);
-  }
-
-  .image-frame-img {
-    max-height: min(58vh, 520px);
+  .header-panel {
+    flex-shrink: 0;
   }
 
   .title {
-    font-size: clamp(48px, 5vw, 72px);
+    font-size: clamp(36px, 4.2vw, 52px);
+  }
+
+  .score-box {
+    min-width: 64px;
+    padding: 6px 10px;
+  }
+
+  .score-value {
+    font-size: 18px;
+  }
+
+  .btn-new {
+    padding: 8px 12px;
+    font-size: 14px;
+  }
+
+  .difficulty-bar {
+    flex-shrink: 0;
+    margin: 0;
+  }
+
+  .diff-btn {
+    min-width: 52px;
+    padding: 4px 8px;
+  }
+
+  .diff-value {
+    font-size: 13px;
+  }
+
+  .diff-name {
+    font-size: 9px;
+  }
+
+  .play-layout {
+    flex: 1;
+    min-height: 0;
+    display: grid;
+    grid-template-columns: auto minmax(280px, 1fr);
+    gap: var(--play-gap);
+    align-items: stretch;
+    overflow: hidden;
+  }
+
+  .play-game {
+    align-items: center;
+    justify-content: center;
+    min-height: 0;
+    overflow: hidden;
+  }
+
+  .play-media {
+    min-height: 0;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .subreddit-bar {
+    flex-shrink: 0;
+    margin: 0;
+  }
+
+  .subreddit-status {
+    margin: 4px 0 0;
+    font-size: 12px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .image-panel {
+    flex: 1;
+    min-height: 0;
+    margin: 0;
+    padding: 8px 12px 10px;
+    overflow: hidden;
+  }
+
+  .image-panel-head {
+    margin-bottom: 6px;
+    flex-shrink: 0;
+  }
+
+  .image-panel-meta {
+    font-size: 12px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .image-frame {
+    flex: 1;
+    min-height: 0;
+    max-height: none;
+    height: 100%;
+  }
+
+  .image-frame-img {
+    max-height: 100%;
+    max-width: 100%;
+  }
+
+  .image-panel-hint {
+    margin: 4px 0 0;
+    flex-shrink: 0;
+  }
+
+  .reveal-meter {
+    margin-top: 6px;
+    flex-shrink: 0;
+  }
+
+  .desktop-hide-credit,
+  .how-to-desktop-hide,
+  .how-to-mobile-hide,
+  .tagline,
+  .header-bottom {
+    display: none !important;
   }
 }
 
-/* Large desktop: slightly roomier board + media */
 @media (min-width: 1200px) {
   :root {
-    --app-width: min(1200px, 94vw);
-    --board-size: 480px;
+    --app-width: min(1240px, 96vw);
+    --board-size: min(460px, calc(100dvh - 140px));
     --cell: calc((var(--board-size) - var(--gap) * 5) / 4);
   }
 
   .play-layout {
-    grid-template-columns: 480px minmax(340px, 1fr);
-    gap: 28px;
+    grid-template-columns: auto minmax(320px, 1fr);
+    gap: 18px;
   }
 }
 

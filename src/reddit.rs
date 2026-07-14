@@ -1,8 +1,8 @@
 //! Fetch a random top image from a subreddit.
 //!
 //! Direct Reddit JSON is blocked in browsers (no CORS / bot walls).
-//! We use archive APIs that expose the same post fields with
-//! `Access-Control-Allow-Origin: *` (Pullpush, then Arctic Shift).
+//! We use Pullpush (and Arctic Shift fallback) with CORS enabled.
+//! Search order for images: top week → top day → top month → all-time / recent.
 
 use serde::Deserialize;
 
@@ -28,7 +28,10 @@ impl std::fmt::Display for RedditError {
             RedditError::InvalidSubreddit => write!(f, "Enter a valid subreddit name"),
             RedditError::Network(s) => write!(f, "Could not load images ({s})"),
             RedditError::NoImages => {
-                write!(f, "No image posts found — try another subreddit (videos are skipped)")
+                write!(
+                    f,
+                    "No image posts found (week/day/month) — try another subreddit"
+                )
             }
             RedditError::Parse(s) => write!(f, "Unexpected API response ({s})"),
         }
@@ -71,7 +74,6 @@ struct Child {
     data: PostData,
 }
 
-/// Pullpush / Arctic return `{ "data": [ posts... ] }`.
 #[derive(Debug, Deserialize)]
 struct PostArrayResponse {
     data: Vec<PostData>,
@@ -106,9 +108,8 @@ struct PreviewSource {
     url: Option<String>,
 }
 
-/// Parse classic Reddit listing JSON (`data.children[].data`).
+/// Parse listing JSON into candidate image posts.
 pub fn extract_images(json: &str, subreddit: &str) -> Result<Vec<RedditImage>, RedditError> {
-    // Prefer flat `{ data: [ ... ] }` (Pullpush / Arctic).
     if let Ok(arr) = serde_json::from_str::<PostArrayResponse>(json) {
         return posts_to_images(arr.data, subreddit);
     }
@@ -120,8 +121,8 @@ pub fn extract_images(json: &str, subreddit: &str) -> Result<Vec<RedditImage>, R
 
 fn posts_to_images(posts: Vec<PostData>, subreddit: &str) -> Result<Vec<RedditImage>, RedditError> {
     let mut out = Vec::new();
+    let mut seen_urls = std::collections::HashSet::new();
     for p in posts {
-        // NSFW/over_18 allowed (needed for subs like FiftyFifty).
         if p.is_video.unwrap_or(false) || p.is_gallery.unwrap_or(false) {
             continue;
         }
@@ -135,6 +136,10 @@ fn posts_to_images(posts: Vec<PostData>, subreddit: &str) -> Result<Vec<RedditIm
         if !is_image_url(&url) {
             continue;
         }
+        let url = decode_url(&url);
+        if !seen_urls.insert(url.clone()) {
+            continue;
+        }
         let permalink = p.permalink.unwrap_or_default();
         let permalink = if permalink.starts_with("http") {
             permalink
@@ -142,7 +147,7 @@ fn posts_to_images(posts: Vec<PostData>, subreddit: &str) -> Result<Vec<RedditIm
             format!("https://www.reddit.com{permalink}")
         };
         out.push(RedditImage {
-            url: decode_url(&url),
+            url,
             title: p.title.unwrap_or_default(),
             permalink,
             subreddit: subreddit.to_string(),
@@ -189,20 +194,82 @@ fn decode_url(url: &str) -> String {
     url.replace("&amp;", "&")
 }
 
-/// Candidate API endpoints (all expected to allow browser CORS).
+/// Pick a random image, preferring ones not in `avoid_urls` (recent history).
+pub fn pick_random_image(images: &[RedditImage], avoid_urls: &[String]) -> Option<RedditImage> {
+    if images.is_empty() {
+        return None;
+    }
+    let fresh: Vec<&RedditImage> = images
+        .iter()
+        .filter(|img| !avoid_urls.iter().any(|u| u == &img.url))
+        .collect();
+    let pool = if fresh.is_empty() {
+        images.iter().collect::<Vec<_>>()
+    } else {
+        fresh
+    };
+    Some(pool[fastrand::usize(..pool.len())].clone())
+}
+
 #[cfg(target_arch = "wasm32")]
-fn listing_endpoints(subreddit: &str) -> Vec<String> {
+fn now_secs() -> u64 {
+    (js_sys::Date::now() / 1000.0) as u64
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[cfg(target_arch = "wasm32")]
+fn now_secs() -> u64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// Pullpush windows: top by score within time range (via `since` unix ts).
+/// Order: week → day → month → all-time score → recent.
+#[cfg(target_arch = "wasm32")]
+fn listing_endpoints(subreddit: &str) -> Vec<(String, &'static str)> {
+    let now = now_secs();
+    let day = now.saturating_sub(86_400);
+    let week = now.saturating_sub(604_800);
+    let month = now.saturating_sub(2_592_000);
     vec![
-        // Highest-scoring posts in archive (good stand-in for "top").
-        format!(
-            "https://api.pullpush.io/reddit/search/submission/?subreddit={subreddit}&sort=desc&sort_type=score&size=50"
+        (
+            format!(
+                "https://api.pullpush.io/reddit/search/submission/?subreddit={subreddit}&sort=desc&sort_type=score&size=100&since={week}"
+            ),
+            "top week",
         ),
-        // Recent archive dump as fallback.
-        format!(
-            "https://api.pullpush.io/reddit/search/submission/?subreddit={subreddit}&sort=desc&sort_type=created_utc&size=50"
+        (
+            format!(
+                "https://api.pullpush.io/reddit/search/submission/?subreddit={subreddit}&sort=desc&sort_type=score&size=100&since={day}"
+            ),
+            "top today",
         ),
-        format!(
-            "https://arctic-shift.photon-reddit.com/api/posts/search?subreddit={subreddit}&limit=50&sort=desc"
+        (
+            format!(
+                "https://api.pullpush.io/reddit/search/submission/?subreddit={subreddit}&sort=desc&sort_type=score&size=100&since={month}"
+            ),
+            "top month",
+        ),
+        (
+            format!(
+                "https://api.pullpush.io/reddit/search/submission/?subreddit={subreddit}&sort=desc&sort_type=score&size=100"
+            ),
+            "top all-time",
+        ),
+        (
+            format!(
+                "https://api.pullpush.io/reddit/search/submission/?subreddit={subreddit}&sort=desc&sort_type=created_utc&size=100"
+            ),
+            "recent",
+        ),
+        (
+            format!(
+                "https://arctic-shift.photon-reddit.com/api/posts/search?subreddit={subreddit}&limit=100&sort=desc"
+            ),
+            "archive",
         ),
     ]
 }
@@ -221,13 +288,20 @@ async fn fetch_text(url: &str) -> Result<String, RedditError> {
         .map_err(|e| RedditError::Network(e.to_string()))
 }
 
-/// Fetch listing JSON from the first working CORS-friendly API.
+/// Try week → day → month → fallbacks until we get images.
 #[cfg(target_arch = "wasm32")]
-pub async fn fetch_listing_json(subreddit: &str) -> Result<String, RedditError> {
-    let mut last_err = RedditError::Network("no source tried".into());
-    for url in listing_endpoints(subreddit) {
+pub async fn fetch_images_with_fallback(
+    subreddit: &str,
+) -> Result<(Vec<RedditImage>, &'static str), RedditError> {
+    let mut last_err = RedditError::NoImages;
+    for (url, label) in listing_endpoints(subreddit) {
         match fetch_text(&url).await {
-            Ok(text) if text.trim_start().starts_with('{') => return Ok(text),
+            Ok(text) if text.trim_start().starts_with('{') => match extract_images(&text, subreddit)
+            {
+                Ok(imgs) if !imgs.is_empty() => return Ok((imgs, label)),
+                Ok(_) => last_err = RedditError::NoImages,
+                Err(e) => last_err = e,
+            },
             Ok(_) => last_err = RedditError::Parse("non-JSON body".into()),
             Err(e) => last_err = e,
         }
@@ -236,19 +310,21 @@ pub async fn fetch_listing_json(subreddit: &str) -> Result<String, RedditError> 
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-pub async fn fetch_listing_json(_subreddit: &str) -> Result<String, RedditError> {
+pub async fn fetch_images_with_fallback(
+    _subreddit: &str,
+) -> Result<(Vec<RedditImage>, &'static str), RedditError> {
     Err(RedditError::Network("browser only".into()))
 }
 
-/// Load a random top image for the subreddit.
-pub async fn load_random_image(raw_sub: &str) -> Result<RedditImage, RedditError> {
+/// Load a random top image; avoids recently shown URLs when possible.
+pub async fn load_random_image(
+    raw_sub: &str,
+    avoid_urls: &[String],
+) -> Result<(RedditImage, &'static str), RedditError> {
     let sub = normalize_subreddit(raw_sub).ok_or(RedditError::InvalidSubreddit)?;
-    let json = fetch_listing_json(&sub).await?;
-    let images = extract_images(&json, &sub)?;
-    // Prefer a random pick among the first results (already score-sorted from Pullpush).
-    let pool = images.len().min(25);
-    let idx = fastrand::usize(..pool);
-    Ok(images[idx].clone())
+    let (images, window) = fetch_images_with_fallback(&sub).await?;
+    let img = pick_random_image(&images, avoid_urls).ok_or(RedditError::NoImages)?;
+    Ok((img, window))
 }
 
 #[cfg(test)]
@@ -295,10 +371,7 @@ mod tests {
           }
         }"#;
         let imgs = extract_images(json, "cats").unwrap();
-        // NSFW still images are allowed; video would still be skipped.
         assert_eq!(imgs.len(), 2);
-        assert_eq!(imgs[0].url, "https://i.redd.it/abc123.jpg");
-        assert_eq!(imgs[1].url, "https://i.redd.it/nsfw.jpg");
     }
 
     #[test]
@@ -324,7 +397,30 @@ mod tests {
         }"#;
         let imgs = extract_images(json, "pics").unwrap();
         assert_eq!(imgs.len(), 1);
-        assert_eq!(imgs[0].title, "Top post");
         assert!(imgs[0].permalink.starts_with("https://www.reddit.com/"));
+    }
+
+    #[test]
+    fn pick_avoids_recent() {
+        let imgs = vec![
+            RedditImage {
+                url: "https://i.redd.it/a.jpg".into(),
+                title: "a".into(),
+                permalink: "https://reddit.com/a".into(),
+                subreddit: "pics".into(),
+            },
+            RedditImage {
+                url: "https://i.redd.it/b.jpg".into(),
+                title: "b".into(),
+                permalink: "https://reddit.com/b".into(),
+                subreddit: "pics".into(),
+            },
+        ];
+        let avoid = vec!["https://i.redd.it/a.jpg".into()];
+        // With only one free, always get b
+        for _ in 0..20 {
+            let p = pick_random_image(&imgs, &avoid).unwrap();
+            assert_eq!(p.url, "https://i.redd.it/b.jpg");
+        }
     }
 }

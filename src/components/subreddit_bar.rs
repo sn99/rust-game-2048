@@ -9,13 +9,9 @@ pub fn SubredditBar(
     has_image: Signal<bool>,
 ) -> impl IntoView {
     view! {
-        <section class="panel subreddit-bar">
-            <h2 class="panel-title">"Background"</h2>
-            <p class="panel-sub">
-                "Load a top image from a subreddit. It stays fully framed and unblurs as you approach your goal."
-            </p>
+        <section class="panel subreddit-bar compact-panel">
             <div class="subreddit-row">
-                <span class="subreddit-prefix">"r/"</span>
+                <span class="panel-title inline-title">"r/"</span>
                 <input
                     id="subreddit-input"
                     class="subreddit-input"
@@ -48,7 +44,7 @@ pub fn SubredditBar(
                         } else if has_image.get() {
                             "New image"
                         } else {
-                            "Load image"
+                            "Load"
                         }
                     }}
                 </button>
