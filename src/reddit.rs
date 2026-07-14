@@ -75,7 +75,7 @@ impl std::fmt::Display for RedditError {
             RedditError::NoImages => {
                 write!(
                     f,
-                    "No unused image/video left (week→day→month→year→all-time) — try another sub or reload the page"
+                    "No unused public image/video left — try another sub or reload the page"
                 )
             }
             RedditError::Parse(s) => write!(f, "Unexpected API response ({s})"),
@@ -317,28 +317,41 @@ fn post_id_from(p: &PostData) -> String {
     String::new()
 }
 
+/// Title patterns Reddit uses for removed/deleted listings.
+fn title_looks_removed(title: &str) -> bool {
+    let tl = title.trim().to_ascii_lowercase();
+    if tl.is_empty() {
+        return false;
+    }
+    matches!(
+        tl.as_str(),
+        "[deleted]" | "[removed]" | "deleted" | "removed" | "[removed by reddit]"
+    ) || tl.starts_with("[deleted")
+        || tl.starts_with("[removed")
+        || tl.contains("removed by moderator")
+        || tl.contains("removed by reddit")
+        || tl.contains("removed by a moderator")
+        || tl == "[unavailable]"
+}
+
 /// True if archive metadata says the Reddit post page is gone (CDN may still serve media).
 fn post_is_unavailable(p: &PostData) -> bool {
     // Arctic/Reddit mark removed posts this way (media CDN may still serve files).
     if p.removed_by_category.is_some() {
         return true;
     }
-    // Explicitly not indexable ⇒ post page is gone (CDN may still serve files).
-    // Missing field is allowed here and re-checked via post_still_public (Pullpush often omits it).
-    if p.is_robot_indexable == Some(false) {
+    // STRICT: must be explicitly still public. Missing field = treat as unknown/unavailable
+    // until re-verified (Pullpush often omits it; those posts are re-checked via Arctic ids).
+    if p.is_robot_indexable != Some(true) {
         return true;
     }
-    if let Some(title) = p.title.as_deref().map(str::trim) {
-        let tl = title.to_ascii_lowercase();
-        if matches!(
-            tl.as_str(),
-            "[deleted]" | "[removed]" | "deleted" | "removed" | "[removed by reddit]"
-        ) {
+    if let Some(title) = p.title.as_deref() {
+        if title_looks_removed(title) {
             return true;
         }
     }
     if let Some(st) = p.selftext.as_deref().map(str::trim) {
-        if matches!(st, "[deleted]" | "[removed]") {
+        if matches!(st, "[deleted]" | "[removed]") || title_looks_removed(st) {
             return true;
         }
     }
@@ -355,33 +368,35 @@ fn post_is_unavailable(p: &PostData) -> bool {
     false
 }
 
-/// Live-check fields on a raw JSON post (pre-serde).
-fn json_post_is_public(p: &serde_json::Value) -> bool {
-    // Any non-null removed_by_category ⇒ gone from Reddit UI.
+/// Known-dead from raw JSON (safe to drop without re-fetch).
+fn json_post_is_known_dead(p: &serde_json::Value) -> bool {
     match p.get("removed_by_category") {
-        None => {}
-        Some(v) if v.is_null() => {}
-        Some(_) => return false,
+        Some(v) if !v.is_null() => return true,
+        _ => {}
     }
-    // Must be explicitly still indexable (CDN can outlive the post).
-    if p.get("is_robot_indexable").and_then(|v| v.as_bool()) != Some(true) {
-        return false;
+    if p.get("is_robot_indexable").and_then(|v| v.as_bool()) == Some(false) {
+        return true;
     }
-    if let Some(title) = p.get("title").and_then(|t| t.as_str()).map(str::trim) {
-        let tl = title.to_ascii_lowercase();
-        if matches!(
-            tl.as_str(),
-            "[deleted]" | "[removed]" | "deleted" | "removed" | "[removed by reddit]"
-        ) {
-            return false;
+    if let Some(title) = p.get("title").and_then(|t| t.as_str()) {
+        if title_looks_removed(title) {
+            return true;
         }
     }
     if let Some(author) = p.get("author").and_then(|a| a.as_str()) {
         if author.eq_ignore_ascii_case("[deleted]") || author.eq_ignore_ascii_case("[removed]") {
-            return false;
+            return true;
         }
     }
-    true
+    false
+}
+
+/// Live-check fields on a raw JSON post (pre-serde). Requires explicit robot=true.
+fn json_post_is_public(p: &serde_json::Value) -> bool {
+    if json_post_is_known_dead(p) {
+        return false;
+    }
+    // Must be explicitly still indexable (CDN can outlive the post page).
+    p.get("is_robot_indexable").and_then(|v| v.as_bool()) == Some(true)
 }
 
 fn json_post_id(p: &serde_json::Value) -> Option<String> {
@@ -901,18 +916,8 @@ async fn fetch_pullpush_window(
         .and_then(|d| d.as_array())
         .cloned()
         .unwrap_or_default();
-    // Pullpush is already score-sorted; keep only still-public when fields exist.
-    arr.retain(|p| {
-        // If removal fields are absent, keep and re-verify via Arctic ids later.
-        match p.get("removed_by_category") {
-            Some(v) if !v.is_null() => return false,
-            _ => {}
-        }
-        match p.get("is_robot_indexable") {
-            Some(v) if v.as_bool() == Some(false) => return false,
-            _ => true,
-        }
-    });
+    // Drop known-dead; missing robot field is OK until Arctic ids re-verify.
+    arr.retain(|p| !json_post_is_known_dead(p));
     Ok(arr)
 }
 
@@ -990,44 +995,59 @@ async fn try_pick_live_from_posts(
     avoid_urls: &[String],
     soft_min_score: i64,
 ) -> Result<RedditMedia, RedditError> {
-    let mut media_list = posts_json_to_media(posts, sub)?;
-    media_list.retain(|m| !media_seen_in_session(m, avoid_urls));
-    if media_list.is_empty() {
+    // Drop known-dead early; keep unknowns (e.g. Pullpush missing robot) for Arctic re-check.
+    let mut candidates: Vec<serde_json::Value> = posts
+        .into_iter()
+        .filter(|p| !json_post_is_known_dead(p))
+        .filter(|p| json_post_id(p).is_some())
+        .collect();
+    if candidates.is_empty() {
         return Err(RedditError::NoImages);
     }
-    // Already score-sorted from posts_to_media; prefer posts above soft min.
-    let high: Vec<RedditMedia> = media_list
+    candidates.sort_by(|a, b| json_post_score(b).cmp(&json_post_score(a)));
+
+    let high: Vec<serde_json::Value> = candidates
         .iter()
-        .filter(|m| m.score >= soft_min_score)
+        .filter(|p| json_post_score(p) >= soft_min_score)
         .cloned()
         .collect();
     let ranked = if high.len() >= 5 {
         high
     } else {
-        media_list
+        candidates
     };
 
-    // ONLY randomize inside the top pool — never treat low-score filler as “top”.
-    let mut pool: Vec<RedditMedia> = ranked.into_iter().take(TOP_POOL_SIZE).collect();
-    if pool.is_empty() {
+    let mut top: Vec<serde_json::Value> = ranked.into_iter().take(TOP_POOL_SIZE).collect();
+    if top.is_empty() {
         return Err(RedditError::NoImages);
     }
 
-    // One batch re-verify: drop anything Arctic now marks removed (CDN may still load).
-    let ids: Vec<String> = pool.iter().map(|m| m.id.clone()).collect();
+    // Batch re-verify BEFORE building media — CDN can outlive the Reddit post page.
+    let ids: Vec<String> = top.iter().filter_map(json_post_id).collect();
     let public_ids = reverify_public_ids(&ids).await;
-    pool.retain(|m| public_ids.contains(&m.id));
-    if pool.is_empty() {
+    top.retain(|p| {
+        json_post_id(p)
+            .map(|id| public_ids.contains(&id))
+            .unwrap_or(false)
+    });
+    if top.is_empty() {
         return Err(RedditError::NoImages);
     }
 
-    for i in (1..pool.len()).rev() {
+    // Only convert posts Arctic confirmed as still public (robot=true, not removed).
+    let mut media_list = posts_json_to_media(top, sub)?;
+    media_list.retain(|m| !media_seen_in_session(m, avoid_urls) && !m.id.is_empty());
+    if media_list.is_empty() {
+        return Err(RedditError::NoImages);
+    }
+
+    for i in (1..media_list.len()).rev() {
         let j = fastrand::usize(..=i);
-        pool.swap(i, j);
+        media_list.swap(i, j);
     }
 
     let mut attempts = 0usize;
-    for candidate in pool {
+    for candidate in media_list {
         if attempts >= 25 {
             break;
         }
@@ -1035,9 +1055,16 @@ async fn try_pick_live_from_posts(
         if media_seen_in_session(&candidate, avoid_urls) {
             continue;
         }
+        // Final single-id check right before accepting (catches races / stale batch).
+        if !post_still_public(&candidate.id).await {
+            continue;
+        }
         if let Some(live) = filter_live_media(candidate).await {
             if !media_seen_in_session(&live, avoid_urls) && !live.items.is_empty() {
-                return Ok(live);
+                // One more metadata gate after media probe (CDN can lie).
+                if post_still_public(&live.id).await {
+                    return Ok(live);
+                }
             }
         }
     }
@@ -1051,13 +1078,11 @@ async fn reverify_public_ids(ids: &[String]) -> HashSet<String> {
     if ids.is_empty() {
         return out;
     }
-    // Arctic accepts comma-separated ids; keep batches modest.
     for chunk in ids.chunks(25) {
         let joined = chunk.join(",");
         let url = format!("https://arctic-shift.photon-reddit.com/api/posts/ids?ids={joined}");
         let Ok(text) = fetch_text_with_opts(&url, 500.0).await else {
-            // Conservative: if re-check fails, don't accept any of this chunk
-            // (avoids linking deleted posts when metadata is unavailable).
+            // Conservative: if re-check fails, accept none of this chunk.
             continue;
         };
         let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) else {
@@ -1080,6 +1105,26 @@ async fn reverify_public_ids(ids: &[String]) -> HashSet<String> {
 #[cfg(not(target_arch = "wasm32"))]
 async fn reverify_public_ids(ids: &[String]) -> HashSet<String> {
     ids.iter().cloned().collect()
+}
+
+/// Re-fetch one post by id; true only if still public on the archive.
+/// Used before accepting media so we don't link deleted Reddit posts (CDN may still serve files).
+pub async fn post_is_still_public(id: &str) -> bool {
+    post_still_public(id).await
+}
+
+#[cfg(target_arch = "wasm32")]
+async fn post_still_public(id: &str) -> bool {
+    if id.is_empty() {
+        return false;
+    }
+    let set = reverify_public_ids(&[id.to_string()]).await;
+    set.contains(id)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+async fn post_still_public(id: &str) -> bool {
+    !id.is_empty()
 }
 
 /// Keep only media that still loads (filters Reddit-deleted files).
@@ -1486,9 +1531,42 @@ mod tests {
             "is_robot_indexable": true,
             "removed_by_category": "moderator"
         });
+        let missing_robot = serde_json::json!({
+            "id": "m",
+            "title": "Maybe",
+            "removed_by_category": null
+        });
         assert!(json_post_is_public(&live));
         assert!(!json_post_is_public(&dead));
         assert!(!json_post_is_public(&removed));
+        assert!(!json_post_is_public(&missing_robot));
+        assert!(!json_post_is_known_dead(&missing_robot)); // unknown, not known-dead
+    }
+
+    #[test]
+    fn title_patterns_catch_mod_removed() {
+        assert!(title_looks_removed("[ Removed by moderator ]"));
+        assert!(title_looks_removed("[removed]"));
+        assert!(title_looks_removed("[deleted by user]"));
+        assert!(!title_looks_removed("Nice photo of a cat"));
+    }
+
+    #[test]
+    fn skips_mod_removed_title_even_if_robot_missing_elsewhere() {
+        let json = r#"{
+          "data": [
+            {
+              "id": "gone",
+              "title": "[ Removed by moderator ]",
+              "url": "https://i.redd.it/x.jpg",
+              "permalink": "/r/pics/comments/gone/",
+              "is_robot_indexable": true,
+              "score": 999
+            }
+          ]
+        }"#;
+        let err = extract_images(json, "pics").unwrap_err();
+        assert!(matches!(err, RedditError::NoImages));
     }
 
 }

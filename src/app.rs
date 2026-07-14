@@ -9,7 +9,7 @@ use crate::input::{
 use crate::progress::reveal_progress_range;
 use crate::reddit::{
     filter_live_media, load_random_image, media_seen_in_session, normalize_subreddit,
-    warm_media_cache, RedditMedia,
+    post_is_still_public, warm_media_cache, RedditMedia,
 };
 use crate::storage::{
     load_best, load_goal, load_session_seen_urls, load_subreddit, load_subreddit_pool,
@@ -253,16 +253,10 @@ pub fn App() -> impl IntoView {
                         }
                         warm_media_cache(&img);
                         preloaded.set(Some((img, window)));
-                        let status = load_status.get_untracked();
-                        if !status.is_empty() && !status.contains("next ready") {
-                            load_status.set(format!("{status} · next ready"));
-                        }
+                        // Quiet prefetch — no status spam ("next ready", search path, etc.).
                     }
                     Err(_) => {
-                        // Don't spam status on background prefetch failures (e.g. 429).
-                        if preloaded.get_untracked().is_none() {
-                            // leave status as-is
-                        }
+                        // Silent background failure (e.g. 429).
                     }
                 }
                 preload_busy.set(false);
@@ -279,7 +273,8 @@ pub fn App() -> impl IntoView {
         let raw = subreddit.get_untracked();
         let want_sub = normalize_subreddit(&raw).unwrap_or_else(|| raw.trim().to_string());
         loading.set(true);
-        load_status.set("Loading media (skipping deleted)…".into());
+        // Keep prior success status visible; overlay already says "Loading media…".
+        // Do not set long intermediate strings like week→day→month search paths.
 
         spawn_local(async move {
             let mut avoid = load_session_seen_urls();
@@ -293,12 +288,17 @@ pub fn App() -> impl IntoView {
                     && !media_seen_in_session(&img, &avoid)
                 {
                     preloaded.set(None);
-                    if let Some(live) = filter_live_media(img).await {
-                        if !media_seen_in_session(&live, &avoid) {
-                            apply_loaded_media(live, window, reset_board);
-                            loading.set(false);
-                            start_preload();
-                            return;
+                    // Re-check post page still public (prefetch may be minutes old).
+                    if post_is_still_public(&img.id).await {
+                        if let Some(live) = filter_live_media(img).await {
+                            if !media_seen_in_session(&live, &avoid)
+                                && post_is_still_public(&live.id).await
+                            {
+                                apply_loaded_media(live, window, reset_board);
+                                loading.set(false);
+                                start_preload();
+                                return;
+                            }
                         }
                     }
                 } else {
@@ -307,7 +307,6 @@ pub fn App() -> impl IntoView {
                 }
             }
 
-            load_status.set("Searching top week → day → month → year → all-time…".into());
             avoid = load_session_seen_urls();
             match load_random_image(&raw, &avoid).await {
                 Ok((img, window)) => {
