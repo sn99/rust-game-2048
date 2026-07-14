@@ -738,18 +738,6 @@ fn iso_utc_from_unix(secs: f64) -> String {
     )
 }
 
-/// Sparse windows: prefer **one** cheap request each. Avoid multi-page storms.
-/// (label, days_ago, max arctic pages, soft min score)
-#[cfg(target_arch = "wasm32")]
-fn time_windows() -> Vec<(&'static str, Option<i64>, usize, i64)> {
-    vec![
-        ("top week", Some(7), 1, 20),
-        ("top month", Some(30), 1, 50),
-        ("top year", Some(365), 1, 100),
-        ("recent", None, 1, 0),
-    ]
-}
-
 /// How many highest-scoring public posts we randomize among (true “top” pool).
 const TOP_POOL_SIZE: usize = 40;
 
@@ -757,6 +745,35 @@ const TOP_POOL_SIZE: usize = 40;
 thread_local! {
     static LAST_API_MS: std::cell::Cell<f64> = const { std::cell::Cell::new(0.0) };
     static BACKOFF_UNTIL_MS: std::cell::Cell<f64> = const { std::cell::Cell::new(0.0) };
+    /// Active AbortController — cancelled when the user switches sub mid-fetch.
+    static ACTIVE_ABORT: std::cell::RefCell<Option<web_sys::AbortController>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Cancel in-flight archive HTTP requests (Network panel + work stops).
+#[cfg(target_arch = "wasm32")]
+pub fn abort_active_fetches() {
+    ACTIVE_ABORT.with(|c| {
+        if let Some(ctrl) = c.borrow_mut().take() {
+            ctrl.abort();
+        }
+    });
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub fn abort_active_fetches() {}
+
+/// Replace the active abort controller and return its signal for a new request wave.
+#[cfg(target_arch = "wasm32")]
+fn take_abort_signal() -> Option<web_sys::AbortSignal> {
+    let ctrl = web_sys::AbortController::new().ok()?;
+    let signal = ctrl.signal();
+    ACTIVE_ABORT.with(|c| {
+        if let Some(old) = c.borrow_mut().replace(ctrl) {
+            old.abort();
+        }
+    });
+    Some(signal)
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -794,11 +811,18 @@ async fn wait_rate_limit(min_gap_ms: f64) {
 }
 
 #[cfg(target_arch = "wasm32")]
-async fn fetch_text_with_opts(url: &str, min_gap_ms: f64) -> Result<String, RedditError> {
+async fn fetch_text_with_opts(
+    url: &str,
+    min_gap_ms: f64,
+    signal: Option<&web_sys::AbortSignal>,
+) -> Result<String, RedditError> {
     wait_rate_limit(min_gap_ms).await;
 
-    let resp = gloo_net::http::Request::get(url)
-        .header("Accept", "application/json")
+    let mut req = gloo_net::http::Request::get(url).header("Accept", "application/json");
+    if let Some(sig) = signal {
+        req = req.abort_signal(Some(sig));
+    }
+    let resp = req
         .send()
         .await
         .map_err(|e| RedditError::Network(e.to_string()))?;
@@ -806,7 +830,7 @@ async fn fetch_text_with_opts(url: &str, min_gap_ms: f64) -> Result<String, Redd
     if resp.status() == 429 {
         BACKOFF_UNTIL_MS.with(|c| c.set(now_ms() + 25_000.0));
         return Err(RedditError::Network(
-            "Rate limited (HTTP 429). Wait ~25s, then try Load again. Prefer waiting for “next ready” instead of spamming Load."
+            "Rate limited (HTTP 429). Wait ~25s, then try Load again."
                 .into(),
         ));
     }
@@ -846,7 +870,7 @@ async fn fetch_arctic_window(
         }
         url.push_str(&format!("&before={before}"));
 
-        let text = fetch_text_with_opts(&url, 700.0).await?;
+        let text = fetch_text_with_opts(&url, 700.0, None).await?;
         let v: serde_json::Value =
             serde_json::from_str(&text).map_err(|e| RedditError::Parse(e.to_string()))?;
         let Some(arr) = v.get("data").and_then(|d| d.as_array()) else {
@@ -869,6 +893,10 @@ async fn fetch_arctic_window(
             if json_post_is_public(p) {
                 all.push(p.clone());
             }
+        }
+        // Single-page mode is the common path (max_pages == 1).
+        if max_pages <= 1 {
+            break;
         }
         // Early stop once we have a solid high-score public pool.
         let high = all
@@ -907,7 +935,7 @@ async fn fetch_pullpush_window(
         let since = now.saturating_sub((days as u64).saturating_mul(86_400));
         url.push_str(&format!("&since={since}"));
     }
-    let text = fetch_text_with_opts(&url, 3_500.0).await?;
+    let text = fetch_text_with_opts(&url, 3_500.0, None).await?;
     let v: serde_json::Value =
         serde_json::from_str(&text).map_err(|e| RedditError::Parse(e.to_string()))?;
     let mut arr = v
@@ -966,40 +994,55 @@ async fn load_media_batch_for_sub(
     avoid_urls: &[String],
     count: usize,
 ) -> Result<Vec<(RedditMedia, &'static str)>, RedditError> {
+    // New wave of requests — abort anything still running from a skipped sub.
+    let _signal = take_abort_signal();
     let mut last_err = RedditError::NoImages;
 
-    for (label, days, max_pages, soft_min) in time_windows() {
-        // Prefer Arctic first (CORS-friendly, less 429 than Pullpush). One page only.
-        match fetch_arctic_window(sub, days, max_pages, soft_min).await {
-            Ok(posts) => {
-                match try_pick_batch_from_posts(posts, sub, avoid_urls, soft_min, count).await {
-                    Ok(media) if !media.is_empty() => {
-                        return Ok(media.into_iter().map(|m| (m, label)).collect());
-                    }
-                    Ok(_) => last_err = RedditError::NoImages,
-                    Err(e) => last_err = e,
+    // (1) Top of week only — one Arctic page.
+    match fetch_arctic_window(sub, Some(7), 1, 20).await {
+        Ok(posts) => {
+            match try_pick_batch_from_posts(posts, sub, avoid_urls, 20, count).await {
+                Ok(media) if !media.is_empty() => {
+                    return Ok(media.into_iter().map(|m| (m, "top week")).collect());
                 }
-            }
-            Err(e) => last_err = e,
-        }
-
-        // Optional single Pullpush shot if Arctic was thin (skip if backing off).
-        if BACKOFF_UNTIL_MS.with(|c| c.get()) <= now_ms() {
-            match fetch_pullpush_window(sub, days).await {
-                Ok(posts) if !posts.is_empty() => {
-                    match try_pick_batch_from_posts(posts, sub, avoid_urls, soft_min, count).await {
-                        Ok(media) if !media.is_empty() => {
-                            return Ok(media.into_iter().map(|m| (m, label)).collect());
-                        }
-                        Ok(_) => {}
-                        Err(e) => last_err = e,
-                    }
-                }
-                Ok(_) => {}
+                Ok(_) => last_err = RedditError::NoImages,
                 Err(e) => last_err = e,
             }
         }
+        Err(e) => last_err = e,
     }
+
+    // (2) Fallback only if week was empty: one Pullpush week (if not rate-limited).
+    if BACKOFF_UNTIL_MS.with(|c| c.get()) <= now_ms() {
+        match fetch_pullpush_window(sub, Some(7)).await {
+            Ok(posts) if !posts.is_empty() => {
+                match try_pick_batch_from_posts(posts, sub, avoid_urls, 20, count).await {
+                    Ok(media) if !media.is_empty() => {
+                        return Ok(media.into_iter().map(|m| (m, "top week")).collect());
+                    }
+                    Ok(_) => {}
+                    Err(e) => last_err = e,
+                }
+            }
+            Ok(_) => {}
+            Err(e) => last_err = e,
+        }
+    }
+
+    // (3) Last resort: one Arctic “recent” page (no lower bound) — not month/year storms.
+    match fetch_arctic_window(sub, None, 1, 0).await {
+        Ok(posts) => {
+            match try_pick_batch_from_posts(posts, sub, avoid_urls, 0, count).await {
+                Ok(media) if !media.is_empty() => {
+                    return Ok(media.into_iter().map(|m| (m, "recent")).collect());
+                }
+                Ok(_) => last_err = RedditError::NoImages,
+                Err(e) => last_err = e,
+            }
+        }
+        Err(e) => last_err = e,
+    }
+
     Err(last_err)
 }
 
@@ -1012,8 +1055,8 @@ async fn load_media_batch_for_sub(
     Err(RedditError::Network("browser only".into()))
 }
 
-/// From one listing response: one batch id check, then up to `max_n` media-probed posts.
-/// No per-candidate API re-checks (those were the multi-request spam).
+/// From one listing: batch id check, then CDN-probe **only** the posts we keep
+/// (at most `max_n + 2` probes — not the whole listing).
 async fn try_pick_batch_from_posts(
     posts: Vec<serde_json::Value>,
     sub: &str,
@@ -1047,7 +1090,7 @@ async fn try_pick_batch_from_posts(
         return Err(RedditError::NoImages);
     }
 
-    // Single batch re-verify for the whole top pool.
+    // Single batch re-verify for the top pool (metadata trust).
     let ids: Vec<String> = top.iter().filter_map(json_post_id).collect();
     let public_ids = reverify_public_ids(&ids).await;
     top.retain(|p| {
@@ -1061,26 +1104,34 @@ async fn try_pick_batch_from_posts(
 
     let mut media_list = posts_json_to_media(top, sub)?;
     media_list.retain(|m| !media_seen_in_session(m, avoid_urls) && !m.id.is_empty());
+    // Drop tombstone URLs without network.
+    for m in &mut media_list {
+        m.items.retain(|it| !url_looks_deleted(&it.url));
+    }
+    media_list.retain(|m| !m.items.is_empty());
     if media_list.is_empty() {
         return Err(RedditError::NoImages);
     }
 
-    for i in (1..media_list.len()).rev() {
+    // Prefer higher score (list already ranked); light shuffle among top few for variety.
+    let shuffle_n = media_list.len().min(max_n.saturating_mul(2).max(4));
+    for i in (1..shuffle_n).rev() {
         let j = fastrand::usize(..=i);
         media_list.swap(i, j);
     }
 
+    // CDN probe only the posts we actually return (plus a couple of spares if one is dead).
+    let max_probes = max_n.saturating_add(2);
     let mut out = Vec::with_capacity(max_n.min(media_list.len()));
-    let mut attempts = 0usize;
+    let mut probes = 0usize;
     for candidate in media_list {
-        if out.len() >= max_n || attempts >= max_n.saturating_mul(4).max(12) {
+        if out.len() >= max_n || probes >= max_probes {
             break;
         }
-        attempts += 1;
         if media_seen_in_session(&candidate, avoid_urls) {
             continue;
         }
-        // Local CDN/element probe only — no extra archive API per post.
+        probes += 1;
         if let Some(live) = filter_live_media(candidate).await {
             if !media_seen_in_session(&live, avoid_urls) && !live.items.is_empty() {
                 out.push(live);
@@ -1101,10 +1152,12 @@ async fn reverify_public_ids(ids: &[String]) -> HashSet<String> {
     if ids.is_empty() {
         return out;
     }
+    // One signal for this re-verify wave (shares ACTIVE_ABORT with listing if same wave).
+    let signal = ACTIVE_ABORT.with(|c| c.borrow().as_ref().map(|ctrl| ctrl.signal()));
     for chunk in ids.chunks(25) {
         let joined = chunk.join(",");
         let url = format!("https://arctic-shift.photon-reddit.com/api/posts/ids?ids={joined}");
-        let Ok(text) = fetch_text_with_opts(&url, 500.0).await else {
+        let Ok(text) = fetch_text_with_opts(&url, 500.0, signal.as_ref()).await else {
             // Conservative: if re-check fails, accept none of this chunk.
             continue;
         };
@@ -1177,12 +1230,7 @@ pub async fn filter_live_media(media: RedditMedia) -> Option<RedditMedia> {
 
 #[cfg(target_arch = "wasm32")]
 async fn media_item_is_available(item: &MediaItem) -> bool {
-    // Prefer HTTP status when CORS allows; always fall back to element load probe.
-    if let Some(ok) = http_url_ok(&item.url).await {
-        if !ok {
-            return false;
-        }
-    }
+    // One CDN load only (element probe). A separate HTTP GET would double traffic.
     match item.kind {
         MediaKind::Image => probe_image(&item.url).await,
         MediaKind::Video => probe_video(&item.url).await,

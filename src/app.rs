@@ -8,8 +8,8 @@ use crate::input::{
 };
 use crate::progress::reveal_progress_range;
 use crate::reddit::{
-    load_media_batch, load_random_image, media_seen_in_session, normalize_subreddit,
-    warm_media_cache, RedditMedia,
+    abort_active_fetches, load_media_batch, load_random_image, media_seen_in_session,
+    normalize_subreddit, warm_media_cache, RedditMedia,
 };
 use crate::subreddits::warm_community_caches;
 use crate::storage::{
@@ -185,10 +185,13 @@ pub fn App() -> impl IntoView {
         preload_gen.update(|g| *g = g.wrapping_add(1));
         preload_busy.set(false);
         loading.set(false);
+        // Stop browser HTTP work (AbortController) so Network tab clears abandoned calls.
+        abort_active_fetches();
     };
 
     /// One batched API wave fills missing queue slots (not 1 request per post).
     let fill_preload_queue = move || {
+        // (3) Never prefetch when the queue already has enough.
         if loading.get_untracked() || preload_busy.get_untracked() {
             return;
         }
@@ -201,6 +204,9 @@ pub fn App() -> impl IntoView {
             return;
         }
         let need = PRELOAD_TARGET - have;
+        if need == 0 {
+            return;
+        }
         let gen = preload_gen.get_untracked();
         preload_busy.set(true);
 
@@ -358,7 +364,10 @@ pub fn App() -> impl IntoView {
                 return;
             }
             loading.set(false);
-            if image.get_untracked().is_some() {
+            // Only prefetch if the queue still has room (batch often already filled it).
+            if image.get_untracked().is_some()
+                && preload_queue.with_untracked(|q| q.len()) < PRELOAD_TARGET
+            {
                 fill_preload_queue();
             }
         });
