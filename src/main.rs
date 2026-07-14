@@ -6,6 +6,7 @@ mod input;
 mod progress;
 mod reddit;
 mod storage;
+mod subreddits;
 
 use app::App;
 use leptos::prelude::*;

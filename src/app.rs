@@ -10,8 +10,8 @@ use crate::input::{
 use crate::progress::reveal_progress_range;
 use crate::reddit::{filter_live_media, load_random_image, media_seen_in_session, warm_media_cache, RedditMedia};
 use crate::storage::{
-    load_best, load_goal, load_session_seen_urls, load_subreddit, push_recent_media_urls, save_best,
-    save_goal, save_subreddit,
+    load_best, load_goal, load_session_seen_urls, load_subreddit, load_subreddit_pool,
+    push_recent_media_urls, save_best, save_goal, save_subreddit,
 };
 use leptos::prelude::*;
 use wasm_bindgen::closure::Closure;
@@ -38,6 +38,7 @@ pub fn App() -> impl IntoView {
     let reveal_to = RwSignal::new(initial_goal);
 
     let subreddit = RwSignal::new(load_subreddit());
+    let subreddit_pool = RwSignal::new(load_subreddit_pool());
     let image = RwSignal::new(None::<RedditMedia>);
     /// Preloaded next media for instant "New image".
     let preloaded = RwSignal::new(None::<(RedditMedia, &'static str)>);
@@ -436,6 +437,7 @@ pub fn App() -> impl IntoView {
                 <aside class="play-media">
                     <SubredditBar
                         subreddit=subreddit
+                        pool=subreddit_pool
                         status=load_status.into()
                         loading=loading.into()
                         on_load=on_load_image

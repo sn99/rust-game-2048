@@ -4,6 +4,7 @@
 use crate::difficulty::{clamp_target, DEFAULT_TARGET};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::difficulty::DEFAULT_TARGET;
+use crate::subreddits::SubredditPool;
 
 #[cfg(target_arch = "wasm32")]
 const BEST_KEY: &str = "rust-game-2048-best";
@@ -13,6 +14,8 @@ const SUB_KEY: &str = "rust-game-2048-subreddit";
 const GOAL_KEY: &str = "rust-game-2048-goal";
 #[cfg(target_arch = "wasm32")]
 const SESSION_SEEN_KEY: &str = "rust-game-2048-session-seen";
+#[cfg(target_arch = "wasm32")]
+const POOL_KEY: &str = "rust-game-2048-sub-pool";
 
 pub fn load_best() -> u32 {
     #[cfg(target_arch = "wasm32")]
@@ -66,6 +69,34 @@ pub fn save_subreddit(sub: &str) {
     #[cfg(not(target_arch = "wasm32"))]
     {
         let _ = sub;
+    }
+}
+
+pub fn load_subreddit_pool() -> SubredditPool {
+    #[cfg(target_arch = "wasm32")]
+    {
+        web_sys::window()
+            .and_then(|w| w.local_storage().ok().flatten())
+            .and_then(|s| s.get_item(POOL_KEY).ok().flatten())
+            .map(|v| SubredditPool::from_str(&v))
+            .unwrap_or(SubredditPool::Sfw)
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        SubredditPool::Sfw
+    }
+}
+
+pub fn save_subreddit_pool(pool: SubredditPool) {
+    #[cfg(target_arch = "wasm32")]
+    {
+        if let Some(storage) = web_sys::window().and_then(|w| w.local_storage().ok().flatten()) {
+            let _ = storage.set_item(POOL_KEY, pool.as_str());
+        }
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let _ = pool;
     }
 }
 
