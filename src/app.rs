@@ -129,14 +129,6 @@ pub fn App() -> impl IntoView {
         set_timeout(SLIDE_MS, finish_move);
     });
 
-    let new_game = Callback::new(move |_: ()| {
-        animating.set(false);
-        let g = goal.get_untracked();
-        board.update(|b| {
-            let _ = rng.try_update_value(|r| b.reset_with_goal(r, g));
-        });
-    });
-
     let on_select_goal = Callback::new(move |t: u32| {
         let t = clamp_target(t);
         if t == goal.get_untracked() {
@@ -160,17 +152,9 @@ pub fn App() -> impl IntoView {
         push_recent_media_urls(img.items.iter().map(|i| i.url.clone()));
         warm_media_cache(&img);
 
-        // Title lives only in the reveal panel — don't duplicate it in the chrome status.
-        let kind_bit = if img.has_video() && img.is_multi() {
-            format!(" · {} clips/photos", img.items.len())
-        } else if img.has_video() {
-            " · video".into()
-        } else if img.is_multi() {
-            format!(" · {} photos", img.items.len())
-        } else {
-            String::new()
-        };
-        load_status.set(format!("{window}{kind_bit}"));
+        // Clear chrome errors; post title lives only in the reveal panel.
+        let _ = window;
+        load_status.set(String::new());
         slide_index.set(0);
         image.set(Some(img));
         lightbox_sharp.set(false);
@@ -311,7 +295,8 @@ pub fn App() -> impl IntoView {
         });
     };
 
-    let on_load_image = Callback::new(move |_: ()| {
+    /// Play / Next: always reset board + load media for the current sub.
+    let on_play = Callback::new(move |_: ()| {
         load_media(true);
     });
 
@@ -398,14 +383,13 @@ pub fn App() -> impl IntoView {
                 score=score
                 best=best.into()
                 win_tile=win_tile
-                on_new_game=new_game
                 target=win_tile
                 on_select=on_select_goal
                 subreddit=subreddit
                 pool=subreddit_pool
                 status=load_status.into()
                 loading=loading.into()
-                on_load=on_load_image
+                on_play=on_play
                 has_image=has_image
             />
 

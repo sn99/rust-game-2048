@@ -1,4 +1,4 @@
-//! Dense top chrome: scores, goal, subreddit, and status in two tight rows.
+//! Dense top chrome: scores, goal, subreddit — one primary action + SFW/NSFW.
 
 use crate::difficulty::{self, TARGETS};
 use crate::storage::{save_subreddit, save_subreddit_pool};
@@ -13,15 +13,15 @@ pub fn Chrome(
     score: Signal<u32>,
     best: Signal<u32>,
     win_tile: Signal<u32>,
-    on_new_game: Callback<()>,
     target: Signal<u32>,
     on_select: Callback<u32>,
     subreddit: RwSignal<String>,
     pool: RwSignal<SubredditPool>,
+    /// Errors only (empty on success) — avoids “top week” chrome noise.
     status: Signal<String>,
     loading: Signal<bool>,
-    on_load: Callback<()>,
-    #[allow(unused_variables)]
+    /// Reset board + load media for current sub (or start if empty).
+    on_play: Callback<()>,
     has_image: Signal<bool>,
 ) -> impl IntoView {
     let description = RwSignal::new(String::new());
@@ -53,9 +53,9 @@ pub fn Chrome(
         }
     }
 
-    let load_named = move || {
+    let run_play = move || {
         refresh_description(subreddit.get_untracked());
-        on_load.run(());
+        on_play.run(());
     };
 
     let on_random_pool = move |p: SubredditPool| {
@@ -79,7 +79,27 @@ pub fn Chrome(
                 }
             }
         });
-        on_load.run(());
+        on_play.run(());
+    };
+
+    let action_label = move || {
+        if loading.get() {
+            "Fetching…"
+        } else if has_image.get() {
+            "Next"
+        } else {
+            "Play"
+        }
+    };
+
+    let action_title = move || {
+        if loading.get() {
+            "Loading media…".to_string()
+        } else if has_image.get() {
+            "New board + another top post from this sub".to_string()
+        } else {
+            "Load a top post and start playing".to_string()
+        }
     };
 
     view! {
@@ -156,24 +176,24 @@ pub fn Chrome(
                         on:keydown=move |ev| {
                             if ev.key() == "Enter" {
                                 ev.prevent_default();
-                                load_named();
+                                run_play();
                             }
                         }
                     />
                     <button
-                        class="btn btn-load"
+                        class="btn btn-primary-action"
                         type="button"
                         prop:disabled=move || loading.get()
-                        title="Load a top post from this subreddit (same board)"
-                        on:click=move |_| load_named()
+                        title=action_title
+                        on:click=move |_| run_play()
                     >
-                        {move || if loading.get() { "…" } else { "Load" }}
+                        {action_label}
                     </button>
                     <button
                         type="button"
                         class="btn btn-discover btn-discover-sfw"
                         prop:disabled=move || loading.get()
-                        title="Random SFW subreddit"
+                        title="Surprise me with a random SFW subreddit"
                         on:click=move |_| on_random_pool(SubredditPool::Sfw)
                     >
                         "SFW"
@@ -182,50 +202,39 @@ pub fn Chrome(
                         type="button"
                         class="btn btn-discover btn-discover-nsfw"
                         prop:disabled=move || loading.get()
-                        title="Random NSFW (18+) subreddit"
+                        title="Surprise me with a random NSFW (18+) subreddit"
                         on:click=move |_| on_random_pool(SubredditPool::NsfwOnly)
                     >
                         "NSFW"
                     </button>
-                    <button
-                        class="btn btn-new"
-                        type="button"
-                        title="Reset the board (keeps best score and current image)"
-                        on:click=move |_| on_new_game.run(())
-                    >
-                        "New Game"
-                    </button>
                 </div>
             </div>
 
-            <div class="chrome-row chrome-row-meta" aria-live="polite">
-                <p class="chrome-meta-status">
-                    {move || {
-                        let st = status.get();
-                        let st = st.trim();
-                        if st.is_empty() {
-                            String::new()
-                        } else {
-                            st.to_string()
-                        }
-                    }}
-                </p>
-                <span class="chrome-meta-sep" aria-hidden="true"></span>
-                <p class="chrome-meta-blurb">
-                    {move || {
-                        let name = subreddit.get();
-                        let name = name.trim().to_string();
-                        let desc = description.get();
-                        if name.is_empty() {
-                            String::new()
-                        } else if desc.is_empty() {
-                            format!("r/{name}")
-                        } else {
-                            format!("r/{name} — {desc}")
-                        }
-                    }}
-                </p>
-            </div>
+            <Show when=move || {
+                !description.get().is_empty()
+                    || !subreddit.get().trim().is_empty()
+                    || !status.get().trim().is_empty()
+            }>
+                <div class="chrome-row chrome-row-meta" aria-live="polite">
+                    <Show when=move || !status.get().trim().is_empty()>
+                        <p class="chrome-meta-status">{move || status.get()}</p>
+                    </Show>
+                    <p class="chrome-meta-blurb">
+                        {move || {
+                            let name = subreddit.get();
+                            let name = name.trim().to_string();
+                            let desc = description.get();
+                            if name.is_empty() {
+                                String::new()
+                            } else if desc.is_empty() {
+                                format!("r/{name}")
+                            } else {
+                                format!("r/{name} — {desc}")
+                            }
+                        }}
+                    </p>
+                </div>
+            </Show>
         </header>
     }
 }

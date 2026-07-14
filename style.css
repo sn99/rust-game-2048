@@ -252,10 +252,25 @@ body {
   font-size: 13px;
 }
 
-.chrome .btn-load,
-.chrome .btn-new {
-  padding: 6px 10px;
+.chrome .btn-primary-action {
+  padding: 6px 12px;
   font-size: 12.5px;
+  font-weight: 700;
+  min-width: 5.5rem;
+  background: var(--accent);
+  color: #f9f6f2;
+  border: 0;
+  border-radius: 8px;
+  white-space: nowrap;
+}
+
+.chrome .btn-primary-action:hover:not(:disabled) {
+  background: #f65e3b;
+}
+
+.chrome .btn-primary-action:disabled {
+  opacity: 0.65;
+  cursor: wait;
 }
 
 .chrome .btn-discover {
@@ -282,59 +297,44 @@ body {
   cursor: wait;
 }
 
-/* Meta: short load hint left · subreddit description right-aligned */
+/* Meta: errors left (rare) · subreddit description right — no empty row */
 .chrome-row-meta {
   gap: 10px;
-  align-items: flex-start;
-  padding-top: 1px;
-  justify-content: space-between;
+  align-items: baseline;
+  padding-top: 2px;
+  justify-content: flex-end;
+  min-height: 0;
 }
 
 .chrome-meta-status {
   margin: 0;
-  flex: 0 1 auto;
+  flex: 1 1 auto;
   min-width: 0;
-  max-width: 40%;
   text-align: left;
   font-size: 12px;
-  line-height: 1.4;
-  opacity: 0.72;
+  line-height: 1.35;
+  color: #a65d52;
+  opacity: 0.95;
   white-space: normal;
-  overflow: visible;
   word-break: break-word;
-}
-
-.chrome-meta-sep {
-  display: none;
-  flex: 0 0 auto;
-  width: 1px;
-  align-self: stretch;
-  min-height: 1em;
-  margin: 2px 0;
-  background: rgba(119, 110, 101, 0.2);
 }
 
 .chrome-meta-blurb {
   margin: 0;
-  flex: 1 1 auto;
+  flex: 0 1 auto;
+  max-width: 100%;
   min-width: 0;
   text-align: right;
   font-size: 12px;
-  line-height: 1.4;
+  line-height: 1.35;
   opacity: 0.85;
   white-space: normal;
-  overflow: visible;
   word-break: break-word;
 }
 
 .chrome-meta-status:empty,
 .chrome-meta-blurb:empty {
   display: none;
-}
-
-/* When only the description is present, keep it full-width right-aligned */
-.chrome-meta-status:empty ~ .chrome-meta-blurb {
-  flex: 1 1 100%;
 }
 
 .btn {
@@ -1035,29 +1035,19 @@ video.lightbox-img {
     font-size: 12.5px;
   }
 
-  .chrome .btn-load,
+  .chrome .btn-primary-action,
   .chrome .btn-discover {
-    padding: 5px 8px;
+    padding: 5px 10px;
     font-size: 12px;
   }
 
-  .chrome-meta-sep {
-    display: block;
+  .chrome .btn-primary-action {
+    min-width: 5.25rem;
   }
 
   .chrome-meta-blurb,
   .chrome-meta-status {
     font-size: 12px;
-  }
-
-  .chrome-meta-status {
-    flex: 0 0 auto;
-    max-width: 28%;
-  }
-
-  .chrome-meta-blurb {
-    flex: 1 1 auto;
-    text-align: right;
   }
 
   .play-layout {
@@ -1189,20 +1179,20 @@ video.lightbox-img {
     flex: 1 1 120px;
   }
 
+  .chrome-row-meta {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 2px;
+  }
+
   .chrome-meta-status {
-    flex: 1 1 100%;
-    max-width: 100%;
     text-align: left;
+    max-width: 100%;
   }
 
   .chrome-meta-blurb {
-    flex: 1 1 100%;
     text-align: right;
-  }
-
-  .chrome-row-meta {
-    flex-direction: column;
-    gap: 2px;
+    max-width: 100%;
   }
 
   .btn-new {
