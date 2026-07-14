@@ -1,4 +1,4 @@
-//! Compact top controls: goal difficulty + subreddit/random in one bar.
+//! Dense top chrome: scores, goal, subreddit, and status in two tight rows.
 
 use crate::difficulty::{self, TARGETS};
 use crate::storage::{save_subreddit, save_subreddit_pool};
@@ -9,7 +9,11 @@ use leptos::prelude::*;
 use wasm_bindgen_futures::spawn_local;
 
 #[component]
-pub fn TopBar(
+pub fn Chrome(
+    score: Signal<u32>,
+    best: Signal<u32>,
+    win_tile: Signal<u32>,
+    on_new_game: Callback<()>,
     target: Signal<u32>,
     on_select: Callback<u32>,
     subreddit: RwSignal<String>,
@@ -78,10 +82,24 @@ pub fn TopBar(
     };
 
     view! {
-        <section class="panel top-bar compact-panel" aria-label="Goal and subreddit">
-            <div class="top-bar-row">
-                <div class="top-bar-goal" role="group" aria-label="Difficulty — win target">
-                    <span class="panel-title inline-title">"Goal"</span>
+        <header class="panel chrome compact-panel" aria-label="Game controls">
+            <div class="chrome-row chrome-row-main">
+                <div class="chrome-brand">
+                    <h1 class="title">{move || win_tile.get().to_string()}</h1>
+                    <div class="scores">
+                        <div class="score-box">
+                            <div class="score-label">"SCORE"</div>
+                            <div class="score-value">{score}</div>
+                        </div>
+                        <div class="score-box">
+                            <div class="score-label">"BEST"</div>
+                            <div class="score-value">{best}</div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="chrome-goals" role="group" aria-label="Difficulty — win target">
+                    <span class="panel-title inline-title chrome-label">"Goal"</span>
                     <div class="difficulty-buttons">
                         {TARGETS
                             .iter()
@@ -109,14 +127,11 @@ pub fn TopBar(
                     </div>
                 </div>
 
-                <div class="top-bar-divider" aria-hidden="true"></div>
-
-                <div class="top-bar-sub" role="group" aria-label="Subreddit">
-                    <span class="panel-title inline-title">"Sub"</span>
+                <div class="chrome-sub" role="group" aria-label="Subreddit">
                     <span class="subreddit-prefix" aria-hidden="true">"r/"</span>
                     <input
                         id="subreddit-input"
-                        class="subreddit-input top-bar-input"
+                        class="subreddit-input chrome-input"
                         type="text"
                         prop:value=move || subreddit.get()
                         prop:disabled=move || loading.get()
@@ -174,28 +189,74 @@ pub fn TopBar(
                     >
                         "NSFW"
                     </button>
+                    <button
+                        class="btn btn-new"
+                        type="button"
+                        on:click=move |_| on_new_game.run(())
+                    >
+                        "New Game"
+                    </button>
                 </div>
             </div>
-            <p class="top-bar-meta" aria-live="polite">
-                {move || {
+
+            <div class="chrome-row chrome-row-meta">
+                <p class="chrome-meta" aria-live="polite" title=move || {
+                    // Full text for hover when long
                     let name = subreddit.get();
                     let name = name.trim().to_string();
                     let desc = description.get();
                     let st = status.get();
-                    let mut parts = Vec::new();
-                    if !name.is_empty() {
-                        if desc.is_empty() {
-                            parts.push(format!("r/{name}"));
-                        } else {
-                            parts.push(format!("r/{name} — {desc}"));
-                        }
-                    }
-                    if !st.is_empty() {
-                        parts.push(st);
-                    }
-                    parts.join(" · ")
-                }}
-            </p>
-        </section>
+                    format_meta(&name, &desc, &st)
+                }>
+                    {move || {
+                        let name = subreddit.get();
+                        let name = name.trim().to_string();
+                        let desc = description.get();
+                        let st = status.get();
+                        format_meta(&name, &desc, &st)
+                    }}
+                </p>
+            </div>
+        </header>
     }
+}
+
+/// One clean line: `r/sub — blurb · load status` without duplicating the sub name.
+fn format_meta(name: &str, desc: &str, status: &str) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    if !name.is_empty() {
+        if desc.is_empty() {
+            parts.push(format!("r/{name}"));
+        } else {
+            parts.push(format!("r/{name} — {desc}"));
+        }
+    }
+    let st = status.trim();
+    if !st.is_empty() {
+        // Drop leading "r/foo · " if status still has it from older format.
+        let cleaned = strip_redundant_sub_prefix(st, name);
+        if !cleaned.is_empty() && !parts.iter().any(|p| p == &cleaned) {
+            parts.push(cleaned);
+        }
+    }
+    parts.join(" · ")
+}
+
+fn strip_redundant_sub_prefix(status: &str, name: &str) -> String {
+    let mut s = status.to_string();
+    if !name.is_empty() {
+        let prefixes = [
+            format!("r/{name} · "),
+            format!("r/{name} — "),
+            format!("r/{name}: "),
+            format!("r/{name} "),
+        ];
+        for p in prefixes {
+            if s.to_ascii_lowercase().starts_with(&p.to_ascii_lowercase()) {
+                s = s[p.len()..].to_string();
+                break;
+            }
+        }
+    }
+    s
 }

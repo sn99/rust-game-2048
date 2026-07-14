@@ -1,5 +1,5 @@
 use crate::components::{
-    BoardView, Header, ImagePanel, Lightbox, Overlay, RevealBackground, TopBar,
+    BoardView, Chrome, ImagePanel, Lightbox, Overlay, RevealBackground,
 };
 use crate::difficulty::clamp_target;
 use crate::game::{Board, Direction};
@@ -179,10 +179,8 @@ pub fn App() -> impl IntoView {
             };
             format!(" — {t}")
         };
-        load_status.set(format!(
-            "r/{} · {}{}{}",
-            img.subreddit, window, kind_bit, title_bit
-        ));
+        // Status without r/sub — chrome already shows the community + blurb.
+        load_status.set(format!("{window}{kind_bit}{title_bit}"));
         slide_index.set(0);
         image.set(Some(img));
         lightbox_sharp.set(false);
@@ -407,13 +405,11 @@ pub fn App() -> impl IntoView {
             sharp=lightbox_sharp
         />
         <main class="app">
-            <Header
+            <Chrome
                 score=score
                 best=best.into()
                 win_tile=win_tile
                 on_new_game=new_game
-            />
-            <TopBar
                 target=win_tile
                 on_select=on_select_goal
                 subreddit=subreddit

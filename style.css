@@ -113,84 +113,152 @@ body {
   opacity: 0.85;
 }
 
-/* Header */
-.header-panel {
-  padding: 16px 18px;
+/* Unified chrome (title + scores + goal + sub) */
+.chrome {
+  padding: 10px 12px 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
 }
 
-.header-top {
+.chrome-row {
   display: flex;
-  justify-content: space-between;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  min-width: 0;
+}
+
+.chrome-row-main {
+  justify-content: flex-start;
+}
+
+.chrome-brand {
+  display: flex;
   align-items: center;
   gap: 10px;
-  flex-wrap: wrap;
-}
-
-.brand {
+  flex: 0 0 auto;
   min-width: 0;
 }
 
 .title {
-  font-size: clamp(42px, 11vw, 68px);
+  font-size: clamp(28px, 6vw, 40px);
   font-weight: 800;
   line-height: 0.95;
   margin: 0;
   color: var(--text);
   font-variant-numeric: tabular-nums;
   letter-spacing: -0.02em;
-}
-
-.tagline {
-  margin: 6px 0 0;
-  font-size: 12px;
-  font-weight: 700;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-  opacity: 0.55;
+  flex: 0 0 auto;
 }
 
 .scores {
   display: flex;
-  gap: 8px;
+  gap: 6px;
   flex-shrink: 0;
 }
 
 .score-box {
   background: var(--score-bg);
   border-radius: 8px;
-  min-width: 72px;
-  padding: 8px 12px;
+  min-width: 56px;
+  padding: 5px 10px;
   text-align: center;
   color: #fff;
   box-shadow: inset 0 -2px 0 rgba(0, 0, 0, 0.08);
 }
 
 .score-label {
-  font-size: 11px;
+  font-size: 10px;
   font-weight: 800;
   letter-spacing: 0.06em;
   opacity: 0.9;
 }
 
 .score-value {
-  font-size: 22px;
+  font-size: 18px;
   font-weight: 800;
-  line-height: 1.2;
+  line-height: 1.15;
 }
 
-.header-bottom {
+.chrome-goals {
   display: flex;
-  justify-content: space-between;
+  flex-wrap: wrap;
   align-items: center;
-  gap: 12px;
-  margin-top: 14px;
+  gap: 6px 8px;
+  flex: 1 1 220px;
+  min-width: 0;
 }
 
-.subtitle {
+.chrome-sub {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  flex: 1 1 280px;
+  min-width: 0;
+  justify-content: flex-end;
+}
+
+.chrome-input {
+  flex: 1 1 100px;
+  min-width: 88px;
+  max-width: 160px;
+  padding: 6px 10px;
+  font-size: 14px;
+}
+
+.chrome .btn-load,
+.chrome .btn-new {
+  padding: 7px 12px;
+  font-size: 13px;
+}
+
+.chrome .btn-discover {
+  padding: 7px 10px;
+  font-size: 12.5px;
+  font-weight: 700;
+  border: 0;
+  border-radius: 8px;
+  color: #f9f6f2;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.btn-discover-sfw {
+  background: #8f7a66;
+}
+
+.btn-discover-nsfw {
+  background: #a65d52;
+}
+
+.btn-discover:disabled {
+  opacity: 0.55;
+  cursor: wait;
+}
+
+.chrome-row-meta {
+  justify-content: flex-end;
+  min-height: 0;
+}
+
+.chrome-meta {
   margin: 0;
-  font-size: 15px;
-  line-height: 1.45;
-  flex: 1;
+  flex: 1 1 100%;
+  text-align: right;
+  font-size: 12.5px;
+  line-height: 1.4;
+  opacity: 0.85;
+  /* Use available width — wrap instead of ellipsis when there's room */
+  white-space: normal;
+  overflow: visible;
+  word-break: break-word;
+  max-width: 100%;
+}
+
+.chrome-label {
+  margin: 0;
 }
 
 .btn {
@@ -299,98 +367,7 @@ body {
   opacity: 0.85;
 }
 
-/* Top bar: Goal + Subreddit (saves space for image) */
-.top-bar {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-
-.top-bar-row {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 10px 14px;
-}
-
-.top-bar-goal,
-.top-bar-sub {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 6px 8px;
-  min-width: 0;
-  flex: 1 1 auto;
-}
-
-.top-bar-sub {
-  flex: 1 1 260px;
-}
-
-.top-bar-divider {
-  width: 1px;
-  align-self: stretch;
-  min-height: 28px;
-  background: #dfd3c3;
-  flex: 0 0 auto;
-}
-
-.top-bar-input {
-  flex: 1 1 100px;
-  min-width: 90px;
-  max-width: 180px;
-  padding: 7px 10px;
-  font-size: 14px;
-}
-
-.top-bar .btn-load {
-  padding: 7px 12px;
-  font-size: 13px;
-}
-
-.top-bar .btn-discover {
-  padding: 7px 10px;
-  font-size: 12.5px;
-  font-weight: 700;
-  border: 0;
-  border-radius: 8px;
-  color: #f9f6f2;
-  cursor: pointer;
-  white-space: nowrap;
-}
-
-.btn-discover-sfw {
-  background: #8f7a66;
-}
-
-.btn-discover-nsfw {
-  background: #a65d52;
-}
-
-.btn-discover:disabled {
-  opacity: 0.55;
-  cursor: wait;
-}
-
-.top-bar-meta {
-  margin: 0;
-  font-size: 12px;
-  line-height: 1.35;
-  opacity: 0.8;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  min-height: 1.2em;
-}
-
-/* Subreddit input bits reused in top bar */
-.subreddit-row {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 8px;
-}
-
+/* Subreddit input (chrome + mobile) */
 .subreddit-prefix {
   font-weight: 800;
   opacity: 0.65;
@@ -909,9 +886,9 @@ video.lightbox-img {
   }
 
   :root {
-    --app-width: min(1180px, 98vw);
-    /* Board fits viewport: leave room for header + goals */
-    --board-size: min(420px, calc(100dvh - 150px), 46vw);
+    --app-width: min(1280px, 98vw);
+    /* Extra board room: chrome is only one compact panel now */
+    --board-size: min(460px, calc(100dvh - 120px), 48vw);
     --cell: calc((var(--board-size) - var(--gap) * 5) / 4);
     --play-gap: 14px;
   }
@@ -919,50 +896,72 @@ video.lightbox-img {
   .app {
     height: 100dvh;
     max-height: 100dvh;
-    padding: 10px 14px 8px;
-    gap: 8px;
+    padding: 8px 12px 6px;
+    gap: 6px;
     overflow: hidden;
     box-sizing: border-box;
   }
 
-  .header-panel {
+  .chrome {
     flex-shrink: 0;
+    margin: 0;
+    padding: 6px 10px 5px;
+    gap: 4px;
   }
 
   .title {
-    font-size: clamp(36px, 4.2vw, 52px);
+    font-size: clamp(28px, 3vw, 36px);
   }
 
   .score-box {
-    min-width: 64px;
-    padding: 6px 10px;
-  }
-
-  .score-value {
-    font-size: 18px;
-  }
-
-  .btn-new {
-    padding: 8px 12px;
-    font-size: 14px;
-  }
-
-  .difficulty-bar {
-    flex-shrink: 0;
-    margin: 0;
-  }
-
-  .diff-btn {
     min-width: 52px;
     padding: 4px 8px;
   }
 
-  .diff-value {
+  .score-value {
+    font-size: 16px;
+  }
+
+  .score-label {
+    font-size: 9px;
+  }
+
+  .btn-new {
+    padding: 6px 10px;
     font-size: 13px;
   }
 
+  .diff-btn {
+    min-width: 48px;
+    padding: 3px 6px;
+  }
+
+  .diff-value {
+    font-size: 12px;
+  }
+
   .diff-name {
-    font-size: 9px;
+    font-size: 8px;
+  }
+
+  .chrome-input {
+    max-width: 150px;
+    padding: 5px 8px;
+    font-size: 13px;
+  }
+
+  .chrome .btn-load,
+  .chrome .btn-discover {
+    padding: 6px 9px;
+    font-size: 12px;
+  }
+
+  .chrome-meta {
+    font-size: 12px;
+    text-align: right;
+    white-space: normal;
+    overflow: visible;
+    text-overflow: unset;
   }
 
   .play-layout {
@@ -988,24 +987,6 @@ video.lightbox-img {
     display: flex;
     flex-direction: column;
     gap: 0;
-  }
-
-  .top-bar {
-    flex-shrink: 0;
-    margin: 0;
-    padding: 6px 10px;
-  }
-
-  .top-bar-divider {
-    display: block;
-  }
-
-  .top-bar-meta {
-    font-size: 11.5px;
-  }
-
-  .top-bar-input {
-    max-width: 140px;
   }
 
   .image-panel {
@@ -1036,8 +1017,7 @@ video.lightbox-img {
   }
 
   .image-frame-img,
-video.image-frame-img {
-
+  video.image-frame-img {
     max-height: 100%;
     max-width: 100%;
   }
@@ -1055,38 +1035,40 @@ video.image-frame-img {
   .desktop-hide-credit,
   .how-to-desktop-hide,
   .how-to-mobile-hide,
-  .tagline,
-  .header-bottom {
+  .tagline {
     display: none !important;
   }
 }
 
 @media (min-width: 1200px) {
   :root {
-    --app-width: min(1240px, 96vw);
-    --board-size: min(460px, calc(100dvh - 140px));
+    --app-width: min(1360px, 97vw);
+    --board-size: min(500px, calc(100dvh - 110px));
     --cell: calc((var(--board-size) - var(--gap) * 5) / 4);
   }
 
   .play-layout {
-    grid-template-columns: auto minmax(320px, 1fr);
-    gap: 18px;
+    grid-template-columns: auto minmax(340px, 1fr);
+    gap: 16px;
+  }
+
+  .chrome-meta {
+    font-size: 12.5px;
   }
 }
 
 @media (max-width: 480px) {
-  .top-bar-divider {
-    display: none;
+  .chrome-sub {
+    justify-content: flex-start;
   }
 
-  .top-bar-input {
+  .chrome-input {
     max-width: none;
     flex: 1 1 120px;
   }
 
-  .header-bottom {
-    flex-direction: column;
-    align-items: stretch;
+  .chrome-meta {
+    text-align: left;
   }
 
   .btn-new {

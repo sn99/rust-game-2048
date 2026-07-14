@@ -19,7 +19,7 @@ After enabling GitHub Pages (Actions source):
 - Keyboard (arrows / WASD) and touch swipe
 - Classic tile colors and pop animation
 - Optional **subreddit background**: load a random top image/video; it unblurs as your highest tile approaches the goal
-  - Compact top bar: goal difficulty + subreddit input + **SFW** / **NSFW** random (description on one line)
+  - Dense chrome: score, goal, subreddit, and **SFW**/**NSFW** random in one panel (status right-aligned, wraps)
   - Uses [Pullpush](https://pullpush.io) / Arctic Shift archives (Reddit blocks direct browser API calls)
 
 ## Develop
