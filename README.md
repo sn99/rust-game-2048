@@ -18,6 +18,7 @@ After enabling GitHub Pages (Actions source):
 - Keyboard (arrows / WASD) and touch swipe
 - Classic tile colors and pop animation
 - Optional **subreddit background**: load a random top image; it unblurs as your highest tile approaches 2048
+  - Uses [Pullpush](https://pullpush.io) / Arctic Shift archives (Reddit blocks direct browser API calls)
 
 ## Develop
 

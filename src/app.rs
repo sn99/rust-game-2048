@@ -89,7 +89,7 @@ pub fn App() -> impl IntoView {
         }
         let raw = subreddit.get_untracked();
         loading.set(true);
-        load_status.set("Fetching top images…".into());
+        load_status.set("Fetching top posts…".into());
         spawn_local(async move {
             match load_random_image(&raw).await {
                 Ok(img) => {

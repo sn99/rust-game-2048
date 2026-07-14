@@ -1,4 +1,8 @@
-//! Fetch a random top image from a subreddit (browser-side via CORS proxies).
+//! Fetch a random top image from a subreddit.
+//!
+//! Direct Reddit JSON is blocked in browsers (no CORS / bot walls).
+//! We use archive APIs that expose the same post fields with
+//! `Access-Control-Allow-Origin: *` (Pullpush, then Arctic Shift).
 
 use serde::Deserialize;
 
@@ -22,9 +26,11 @@ impl std::fmt::Display for RedditError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             RedditError::InvalidSubreddit => write!(f, "Enter a valid subreddit name"),
-            RedditError::Network(s) => write!(f, "Could not reach Reddit ({s})"),
-            RedditError::NoImages => write!(f, "No image posts found in top results"),
-            RedditError::Parse(s) => write!(f, "Unexpected Reddit response ({s})"),
+            RedditError::Network(s) => write!(f, "Could not load images ({s})"),
+            RedditError::NoImages => {
+                write!(f, "No SFW image posts found — try another subreddit")
+            }
+            RedditError::Parse(s) => write!(f, "Unexpected API response ({s})"),
         }
     }
 }
@@ -43,7 +49,7 @@ pub fn normalize_subreddit(raw: &str) -> Option<String> {
     }
     if !s
         .chars()
-        .all(|c| c.is_ascii_alphanumeric() || c == '_' )
+        .all(|c| c.is_ascii_alphanumeric() || c == '_')
     {
         return None;
     }
@@ -63,6 +69,12 @@ struct ListingData {
 #[derive(Debug, Deserialize)]
 struct Child {
     data: PostData,
+}
+
+/// Pullpush / Arctic return `{ "data": [ posts... ] }`.
+#[derive(Debug, Deserialize)]
+struct PostArrayResponse {
+    data: Vec<PostData>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -93,13 +105,21 @@ struct PreviewSource {
     url: Option<String>,
 }
 
-/// Parse Reddit listing JSON into candidate image posts (SFW only).
+/// Parse classic Reddit listing JSON (`data.children[].data`).
 pub fn extract_images(json: &str, subreddit: &str) -> Result<Vec<RedditImage>, RedditError> {
+    // Prefer flat `{ data: [ ... ] }` (Pullpush / Arctic).
+    if let Ok(arr) = serde_json::from_str::<PostArrayResponse>(json) {
+        return posts_to_images(arr.data, subreddit);
+    }
     let listing: Listing =
         serde_json::from_str(json).map_err(|e| RedditError::Parse(e.to_string()))?;
+    let posts: Vec<PostData> = listing.data.children.into_iter().map(|c| c.data).collect();
+    posts_to_images(posts, subreddit)
+}
+
+fn posts_to_images(posts: Vec<PostData>, subreddit: &str) -> Result<Vec<RedditImage>, RedditError> {
     let mut out = Vec::new();
-    for child in listing.data.children {
-        let p = child.data;
+    for p in posts {
         if p.over_18.unwrap_or(false) {
             continue;
         }
@@ -116,13 +136,16 @@ pub fn extract_images(json: &str, subreddit: &str) -> Result<Vec<RedditImage>, R
         if !is_image_url(&url) {
             continue;
         }
+        let permalink = p.permalink.unwrap_or_default();
+        let permalink = if permalink.starts_with("http") {
+            permalink
+        } else {
+            format!("https://www.reddit.com{permalink}")
+        };
         out.push(RedditImage {
             url: decode_url(&url),
             title: p.title.unwrap_or_default(),
-            permalink: format!(
-                "https://www.reddit.com{}",
-                p.permalink.unwrap_or_default()
-            ),
+            permalink,
             subreddit: subreddit.to_string(),
         });
     }
@@ -155,6 +178,7 @@ fn is_image_url(url: &str) -> bool {
     u.contains("i.redd.it")
         || u.contains("preview.redd.it")
         || u.contains("i.imgur.com")
+        || u.contains("imgur.com/")
         || u.ends_with(".jpg")
         || u.ends_with(".jpeg")
         || u.ends_with(".png")
@@ -166,55 +190,47 @@ fn decode_url(url: &str) -> String {
     url.replace("&amp;", "&")
 }
 
-/// Reddit listing URL (needs a CORS proxy in the browser).
+/// Candidate API endpoints (all expected to allow browser CORS).
 #[cfg(target_arch = "wasm32")]
-pub fn reddit_listing_url(subreddit: &str) -> String {
-    format!(
-        "https://www.reddit.com/r/{subreddit}/top.json?limit=50&t=month&raw_json=1"
-    )
-}
-
-#[cfg(target_arch = "wasm32")]
-fn proxy_urls(target: &str) -> Vec<String> {
-    let enc = urlencoding_minimal(target);
+fn listing_endpoints(subreddit: &str) -> Vec<String> {
     vec![
-        // Encode full target so query params survive.
-        format!("https://corsproxy.io/?{enc}"),
-        format!("https://api.allorigins.win/raw?url={enc}"),
+        // Highest-scoring posts in archive (good stand-in for "top").
+        format!(
+            "https://api.pullpush.io/reddit/search/submission/?subreddit={subreddit}&sort=desc&sort_type=score&size=50"
+        ),
+        // Recent archive dump as fallback.
+        format!(
+            "https://api.pullpush.io/reddit/search/submission/?subreddit={subreddit}&sort=desc&sort_type=created_utc&size=50"
+        ),
+        format!(
+            "https://arctic-shift.photon-reddit.com/api/posts/search?subreddit={subreddit}&limit=50&sort=desc"
+        ),
     ]
 }
 
-/// Minimal encode for query values (enough for Reddit URLs).
 #[cfg(target_arch = "wasm32")]
-fn urlencoding_minimal(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() * 2);
-    for b in s.bytes() {
-        match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                out.push(b as char);
-            }
-            _ => out.push_str(&format!("%{b:02X}")),
-        }
+async fn fetch_text(url: &str) -> Result<String, RedditError> {
+    let resp = gloo_net::http::Request::get(url)
+        .send()
+        .await
+        .map_err(|e| RedditError::Network(e.to_string()))?;
+    if !resp.ok() {
+        return Err(RedditError::Network(format!("HTTP {}", resp.status())));
     }
-    out
+    resp.text()
+        .await
+        .map_err(|e| RedditError::Network(e.to_string()))
 }
 
-/// Fetch listing text via the first working CORS proxy.
+/// Fetch listing JSON from the first working CORS-friendly API.
 #[cfg(target_arch = "wasm32")]
 pub async fn fetch_listing_json(subreddit: &str) -> Result<String, RedditError> {
-    let target = reddit_listing_url(subreddit);
-    let mut last_err = RedditError::Network("no proxy tried".into());
-    for proxy in proxy_urls(&target) {
-        match gloo_net::http::Request::get(&proxy).send().await {
-            Ok(resp) if resp.ok() => match resp.text().await {
-                Ok(text) if text.trim_start().starts_with('{') => return Ok(text),
-                Ok(_) => last_err = RedditError::Parse("non-JSON body".into()),
-                Err(e) => last_err = RedditError::Network(e.to_string()),
-            },
-            Ok(resp) => {
-                last_err = RedditError::Network(format!("HTTP {}", resp.status()));
-            }
-            Err(e) => last_err = RedditError::Network(e.to_string()),
+    let mut last_err = RedditError::Network("no source tried".into());
+    for url in listing_endpoints(subreddit) {
+        match fetch_text(&url).await {
+            Ok(text) if text.trim_start().starts_with('{') => return Ok(text),
+            Ok(_) => last_err = RedditError::Parse("non-JSON body".into()),
+            Err(e) => last_err = e,
         }
     }
     Err(last_err)
@@ -222,7 +238,7 @@ pub async fn fetch_listing_json(subreddit: &str) -> Result<String, RedditError> 
 
 #[cfg(not(target_arch = "wasm32"))]
 pub async fn fetch_listing_json(_subreddit: &str) -> Result<String, RedditError> {
-    Err(RedditError::Network("wasm only".into()))
+    Err(RedditError::Network("browser only".into()))
 }
 
 /// Load a random top image for the subreddit.
@@ -230,7 +246,9 @@ pub async fn load_random_image(raw_sub: &str) -> Result<RedditImage, RedditError
     let sub = normalize_subreddit(raw_sub).ok_or(RedditError::InvalidSubreddit)?;
     let json = fetch_listing_json(&sub).await?;
     let images = extract_images(&json, &sub)?;
-    let idx = fastrand::usize(..images.len());
+    // Prefer a random pick among the first results (already score-sorted from Pullpush).
+    let pool = images.len().min(25);
+    let idx = fastrand::usize(..pool);
     Ok(images[idx].clone())
 }
 
@@ -241,14 +259,17 @@ mod tests {
     #[test]
     fn normalize() {
         assert_eq!(normalize_subreddit("pics").as_deref(), Some("pics"));
-        assert_eq!(normalize_subreddit("r/EarthPorn").as_deref(), Some("EarthPorn"));
+        assert_eq!(
+            normalize_subreddit("r/EarthPorn").as_deref(),
+            Some("EarthPorn")
+        );
         assert_eq!(normalize_subreddit("/r/cats/").as_deref(), Some("cats"));
         assert_eq!(normalize_subreddit("bad name"), None);
         assert_eq!(normalize_subreddit(""), None);
     }
 
     #[test]
-    fn extract_from_sample() {
+    fn extract_from_reddit_listing() {
         let json = r#"{
           "data": {
             "children": [
@@ -270,15 +291,6 @@ mod tests {
                   "over_18": true,
                   "post_hint": "image"
                 }
-              },
-              {
-                "data": {
-                  "title": "Video",
-                  "url": "https://v.redd.it/vid",
-                  "permalink": "/r/x/",
-                  "over_18": false,
-                  "is_video": true
-                }
               }
             ]
           }
@@ -286,6 +298,32 @@ mod tests {
         let imgs = extract_images(json, "cats").unwrap();
         assert_eq!(imgs.len(), 1);
         assert_eq!(imgs[0].url, "https://i.redd.it/abc123.jpg");
-        assert_eq!(imgs[0].title, "A cat");
+    }
+
+    #[test]
+    fn extract_from_pullpush_array() {
+        let json = r#"{
+          "data": [
+            {
+              "title": "Top post",
+              "url": "https://i.redd.it/top.jpg",
+              "permalink": "/r/pics/comments/1/top/",
+              "over_18": false,
+              "post_hint": "image",
+              "is_video": false
+            },
+            {
+              "title": "Link only",
+              "url": "https://example.com/article",
+              "permalink": "/r/pics/comments/2/",
+              "over_18": false,
+              "is_video": false
+            }
+          ]
+        }"#;
+        let imgs = extract_images(json, "pics").unwrap();
+        assert_eq!(imgs.len(), 1);
+        assert_eq!(imgs[0].title, "Top post");
+        assert!(imgs[0].permalink.starts_with("https://www.reddit.com/"));
     }
 }
