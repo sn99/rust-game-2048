@@ -12,17 +12,23 @@ leptos = { version = "0.8", features = ["csr"] }
 fastrand = "2"
 console_error_panic_hook = "0.1"
 wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+gloo-net = { version = "0.6", features = ["http"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 web-sys = { version = "0.3", features = [
     "Window",
     "Storage",
     "Document",
     "Element",
     "HtmlElement",
+    "HtmlInputElement",
     "TouchEvent",
     "TouchList",
     "Touch",
     "DomRect",
     "KeyboardEvent",
+    "EventTarget",
 ] }
 
 [profile.release]
@@ -30,6 +36,3 @@ opt-level = "z"
 lto = true
 codegen-units = 1
 panic = "abort"
-
-[package.metadata.leptos]
-# unused for pure CSR trunk setup; kept for clarity

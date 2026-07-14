@@ -2,6 +2,8 @@ mod app;
 mod components;
 mod game;
 mod input;
+mod progress;
+mod reddit;
 mod storage;
 
 use app::App;

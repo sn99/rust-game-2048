@@ -39,6 +39,15 @@ pub fn direction_from_swipe(dx: f64, dy: f64) -> Option<Direction> {
 pub fn use_keyboard(on_dir: Callback<Direction>) {
     Effect::new(move |_| {
         let handler = Closure::<dyn FnMut(KeyboardEvent)>::new(move |ev: KeyboardEvent| {
+            // Don't steal keys while typing a subreddit.
+            if let Some(t) = ev.target() {
+                if let Some(el) = t.dyn_ref::<web_sys::HtmlElement>() {
+                    let tag = el.tag_name();
+                    if tag == "INPUT" || tag == "TEXTAREA" || tag == "SELECT" {
+                        return;
+                    }
+                }
+            }
             if let Some(dir) = direction_from_key(&ev.key()) {
                 ev.prevent_default();
                 on_dir.run(dir);

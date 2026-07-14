@@ -107,6 +107,11 @@ impl Board {
         self.score
     }
 
+    /// Highest tile value on the board (0 if empty).
+    pub fn max_tile(&self) -> u32 {
+        self.tiles.iter().map(|t| t.value).max().unwrap_or(0)
+    }
+
     pub fn status(&self) -> GameStatus {
         self.status
     }

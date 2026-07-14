@@ -17,6 +17,7 @@ After enabling GitHub Pages (Actions source):
 - Win at 2048 with **Keep going**, then **Game over**
 - Keyboard (arrows / WASD) and touch swipe
 - Classic tile colors and pop animation
+- Optional **subreddit background**: load a random top image; it unblurs as your highest tile approaches 2048
 
 ## Develop
 
