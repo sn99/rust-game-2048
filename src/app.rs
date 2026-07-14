@@ -109,10 +109,9 @@ pub fn App() -> impl IntoView {
     };
 
     let apply_move = Callback::new(move |dir: Direction| {
-        if animating.get_untracked()
-            || lightbox_open.get_untracked()
-            || loading.get_untracked()
-        {
+        // Only block moves during the first media wait (no image on board yet).
+        let first_load_lock = loading.get_untracked() && image.get_untracked().is_none();
+        if animating.get_untracked() || lightbox_open.get_untracked() || first_load_lock {
             return;
         }
 
@@ -298,29 +297,36 @@ pub fn App() -> impl IntoView {
         preload_queue.set(queue);
 
         if let Some((img, window)) = taken {
-            // Cancel anything still downloading an old sub.
-            cancel_in_flight();
+            // Instant: no loading overlay, no abort of useful preloads for this sub.
             apply_loaded_media(img, window, true);
+            // Cancel only a *competing* foreground load, keep same-sub prefetch.
+            load_gen.update(|g| *g = g.wrapping_add(1));
+            loading.set(false);
             fill_preload_queue();
             return;
         }
 
-        // Supersede previous foreground + background work for the sub we're skipping.
+        // Supersede previous work; clear queue only when starting a full network load.
         let gen = load_gen.get_untracked().wrapping_add(1);
         load_gen.set(gen);
         preload_gen.update(|g| *g = g.wrapping_add(1));
         preload_busy.set(false);
         preload_queue.set(Vec::new());
+        abort_active_fetches();
 
-        loading.set(true);
+        // Only hard-block the board on the *first* media load (no image yet).
+        // When swapping posts, keep playing the current board (no idle spinner).
+        let first_load = image.get_untracked().is_none();
+        if first_load {
+            loading.set(true);
+        }
         load_status.set(String::new());
         let raw_owned = raw.clone();
         spawn_local(async move {
             let avoid = load_session_seen_urls();
-            // Fetch current + extras for the queue in one efficient batch when possible.
+            // One batch: current post + queue fillers (no CDN probe storm).
             let result = load_media_batch(&raw_owned, &avoid, 1 + PRELOAD_TARGET).await;
 
-            // Abandoned: user typed another sub / hit SFW / Next on something else.
             if load_gen.get_untracked() != gen {
                 return;
             }
@@ -338,7 +344,8 @@ pub fn App() -> impl IntoView {
                         });
                     }
                 }
-                Ok(_) => {
+                Ok(_) | Err(_) => {
+                    // Single fallback fetch once.
                     match load_random_image(&raw_owned, &avoid).await {
                         Ok((img, window)) => {
                             if load_gen.get_untracked() != gen {
@@ -353,18 +360,12 @@ pub fn App() -> impl IntoView {
                         }
                     }
                 }
-                Err(e) => {
-                    if load_gen.get_untracked() == gen {
-                        load_status.set(e.to_string());
-                    }
-                }
             }
 
             if load_gen.get_untracked() != gen {
                 return;
             }
             loading.set(false);
-            // Only prefetch if the queue still has room (batch often already filled it).
             if image.get_untracked().is_some()
                 && preload_queue.with_untracked(|q| q.len()) < PRELOAD_TARGET
             {
@@ -385,11 +386,15 @@ pub fn App() -> impl IntoView {
         load_status.set(String::new());
     });
 
-    // Warm SFW + NSFW community decks once so random picks are instant.
+    // Warm SFW/NSFW decks + start post prefetch if a sub is already saved.
     Effect::new(move |_| {
         spawn_local(async {
             let _ = warm_community_caches().await;
         });
+        // Kick queue fill ASAP when we already know the sub (no wait for first Play).
+        if !subreddit.get_untracked().trim().is_empty() {
+            fill_preload_queue();
+        }
     });
 
     let on_clear_image = Callback::new(move |_: ()| {
@@ -408,8 +413,11 @@ pub fn App() -> impl IntoView {
 
     use_keyboard(apply_move);
 
+    // Block play only while waiting for the *first* media (no board image yet).
+    let play_locked = Signal::derive(move || loading.get() && image.get().is_none());
+
     let on_touch_start = move |ev: TouchEvent| {
-        if loading.get_untracked() {
+        if play_locked.get_untracked() {
             return;
         }
         if let Some((x, y)) = touch_start_coords(&ev) {
@@ -421,7 +429,7 @@ pub fn App() -> impl IntoView {
     };
 
     let on_touch_end = move |ev: TouchEvent| {
-        if loading.get_untracked() {
+        if play_locked.get_untracked() {
             return;
         }
         let start = touch.get();
@@ -466,7 +474,7 @@ pub fn App() -> impl IntoView {
                 <section class="play-game">
                     <div
                         class=move || {
-                            if loading.get() {
+                            if play_locked.get() {
                                 "board-wrap board-wrap-locked"
                             } else {
                                 "board-wrap"
@@ -482,7 +490,7 @@ pub fn App() -> impl IntoView {
                             win_tile=win_tile
                             on_next_game=on_play
                         />
-                        <Show when=move || loading.get()>
+                        <Show when=move || play_locked.get()>
                             <div class="board-loading" role="status" aria-live="polite">
                                 <div class="board-loading-card">
                                     <div class="board-loading-spinner"></div>

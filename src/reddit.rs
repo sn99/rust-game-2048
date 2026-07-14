@@ -998,10 +998,10 @@ async fn load_media_batch_for_sub(
     let _signal = take_abort_signal();
     let mut last_err = RedditError::NoImages;
 
-    // (1) Top of week only — one Arctic page.
-    match fetch_arctic_window(sub, Some(7), 1, 20).await {
+    // Fast path: one Arctic page for the last week (soft score floor 0 = take anything usable).
+    match fetch_arctic_window(sub, Some(7), 1, 0).await {
         Ok(posts) => {
-            match try_pick_batch_from_posts(posts, sub, avoid_urls, 20, count).await {
+            match try_pick_batch_from_posts(posts, sub, avoid_urls, 0, count).await {
                 Ok(media) if !media.is_empty() => {
                     return Ok(media.into_iter().map(|m| (m, "top week")).collect());
                 }
@@ -1012,24 +1012,7 @@ async fn load_media_batch_for_sub(
         Err(e) => last_err = e,
     }
 
-    // (2) Fallback only if week was empty: one Pullpush week (if not rate-limited).
-    if BACKOFF_UNTIL_MS.with(|c| c.get()) <= now_ms() {
-        match fetch_pullpush_window(sub, Some(7)).await {
-            Ok(posts) if !posts.is_empty() => {
-                match try_pick_batch_from_posts(posts, sub, avoid_urls, 20, count).await {
-                    Ok(media) if !media.is_empty() => {
-                        return Ok(media.into_iter().map(|m| (m, "top week")).collect());
-                    }
-                    Ok(_) => {}
-                    Err(e) => last_err = e,
-                }
-            }
-            Ok(_) => {}
-            Err(e) => last_err = e,
-        }
-    }
-
-    // (3) Last resort: one Arctic “recent” page (no lower bound) — not month/year storms.
+    // One fallback only if week listing empty/unusable.
     match fetch_arctic_window(sub, None, 1, 0).await {
         Ok(posts) => {
             match try_pick_batch_from_posts(posts, sub, avoid_urls, 0, count).await {
@@ -1055,8 +1038,8 @@ async fn load_media_batch_for_sub(
     Err(RedditError::Network("browser only".into()))
 }
 
-/// From one listing: batch id check, then CDN-probe **only** the posts we keep
-/// (at most `max_n + 2` probes — not the whole listing).
+/// Fast pick from one listing: trust listing metadata + non-tombstone URLs.
+/// **No CDN probes, no second id re-verify** — prioritizes idle time over perfect accuracy.
 async fn try_pick_batch_from_posts(
     posts: Vec<serde_json::Value>,
     sub: &str,
@@ -1064,47 +1047,42 @@ async fn try_pick_batch_from_posts(
     soft_min_score: i64,
     max_n: usize,
 ) -> Result<Vec<RedditMedia>, RedditError> {
-    let mut candidates: Vec<serde_json::Value> = posts
-        .into_iter()
-        .filter(|p| !json_post_is_known_dead(p))
-        .filter(|p| json_post_id(p).is_some())
+    // Prefer explicitly public posts; fall back to “not known dead” if needed.
+    let mut public: Vec<serde_json::Value> = posts
+        .iter()
+        .filter(|p| json_post_is_public(p))
+        .cloned()
         .collect();
-    if candidates.is_empty() {
+    if public.len() < max_n {
+        for p in &posts {
+            if json_post_is_known_dead(p) || json_post_id(p).is_none() {
+                continue;
+            }
+            if public.iter().any(|q| json_post_id(q) == json_post_id(p)) {
+                continue;
+            }
+            public.push(p.clone());
+        }
+    }
+    if public.is_empty() {
         return Err(RedditError::NoImages);
     }
-    candidates.sort_by(|a, b| json_post_score(b).cmp(&json_post_score(a)));
+    public.sort_by(|a, b| json_post_score(b).cmp(&json_post_score(a)));
 
-    let high: Vec<serde_json::Value> = candidates
+    let high: Vec<serde_json::Value> = public
         .iter()
         .filter(|p| json_post_score(p) >= soft_min_score)
         .cloned()
         .collect();
-    let ranked = if high.len() >= 5 {
+    let ranked = if high.len() >= max_n {
         high
     } else {
-        candidates
+        public
     };
 
-    let mut top: Vec<serde_json::Value> = ranked.into_iter().take(TOP_POOL_SIZE).collect();
-    if top.is_empty() {
-        return Err(RedditError::NoImages);
-    }
-
-    // Single batch re-verify for the top pool (metadata trust).
-    let ids: Vec<String> = top.iter().filter_map(json_post_id).collect();
-    let public_ids = reverify_public_ids(&ids).await;
-    top.retain(|p| {
-        json_post_id(p)
-            .map(|id| public_ids.contains(&id))
-            .unwrap_or(false)
-    });
-    if top.is_empty() {
-        return Err(RedditError::NoImages);
-    }
-
+    let top: Vec<serde_json::Value> = ranked.into_iter().take(TOP_POOL_SIZE).collect();
     let mut media_list = posts_json_to_media(top, sub)?;
     media_list.retain(|m| !media_seen_in_session(m, avoid_urls) && !m.id.is_empty());
-    // Drop tombstone URLs without network.
     for m in &mut media_list {
         m.items.retain(|it| !url_looks_deleted(&it.url));
     }
@@ -1113,31 +1091,15 @@ async fn try_pick_batch_from_posts(
         return Err(RedditError::NoImages);
     }
 
-    // Prefer higher score (list already ranked); light shuffle among top few for variety.
+    // Light shuffle among the first few for variety (still score-leaning).
     let shuffle_n = media_list.len().min(max_n.saturating_mul(2).max(4));
     for i in (1..shuffle_n).rev() {
         let j = fastrand::usize(..=i);
         media_list.swap(i, j);
     }
 
-    // CDN probe only the posts we actually return (plus a couple of spares if one is dead).
-    let max_probes = max_n.saturating_add(2);
-    let mut out = Vec::with_capacity(max_n.min(media_list.len()));
-    let mut probes = 0usize;
-    for candidate in media_list {
-        if out.len() >= max_n || probes >= max_probes {
-            break;
-        }
-        if media_seen_in_session(&candidate, avoid_urls) {
-            continue;
-        }
-        probes += 1;
-        if let Some(live) = filter_live_media(candidate).await {
-            if !media_seen_in_session(&live, avoid_urls) && !live.items.is_empty() {
-                out.push(live);
-            }
-        }
-    }
+    // Take up to max_n immediately — zero extra network.
+    let out: Vec<RedditMedia> = media_list.into_iter().take(max_n).collect();
     if out.is_empty() {
         Err(RedditError::NoImages)
     } else {
