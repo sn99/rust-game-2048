@@ -10,7 +10,7 @@ use crate::input::{
 use crate::progress::reveal_progress;
 use crate::reddit::{load_random_image, warm_media_cache, RedditMedia};
 use crate::storage::{
-    load_best, load_goal, load_recent_image_urls, load_subreddit, push_recent_image_url, save_best,
+    load_best, load_goal, load_session_seen_urls, load_subreddit, push_recent_media_urls, save_best,
     save_goal, save_subreddit,
 };
 use leptos::prelude::*;
@@ -138,7 +138,7 @@ pub fn App() -> impl IntoView {
     let apply_loaded_media = move |img: RedditMedia, window: &'static str| {
         save_subreddit(&img.subreddit);
         subreddit.set(img.subreddit.clone());
-        push_recent_image_url(img.primary_url());
+        push_recent_media_urls(img.items.iter().map(|i| i.url.clone()));
         warm_media_cache(&img);
 
         let kind_bit = if img.has_video() && img.is_multi() {
@@ -190,7 +190,7 @@ pub fn App() -> impl IntoView {
         }
         preload_busy.set(true);
         spawn_local(async move {
-            let mut avoid = load_recent_image_urls();
+            let mut avoid = load_session_seen_urls();
             if let Some(cur) = image.get_untracked() {
                 avoid.push(cur.primary_url().to_string());
             }
@@ -230,9 +230,9 @@ pub fn App() -> impl IntoView {
 
         let raw = subreddit.get_untracked();
         loading.set(true);
-        load_status.set("Searching top week → day → month…".into());
+        load_status.set("Searching top week → day → month → year → all-time…".into());
         spawn_local(async move {
-            let avoid = load_recent_image_urls();
+            let avoid = load_session_seen_urls();
             match load_random_image(&raw, &avoid).await {
                 Ok((img, window)) => {
                     apply_loaded_media(img, window);

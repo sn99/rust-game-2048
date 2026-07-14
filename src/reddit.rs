@@ -60,7 +60,7 @@ impl std::fmt::Display for RedditError {
             RedditError::NoImages => {
                 write!(
                     f,
-                    "No image/video posts found (week/day/month) — try another subreddit"
+                    "No unused image/video left (week→day→month→year→all-time) — try another sub or reload the page"
                 )
             }
             RedditError::Parse(s) => write!(f, "Unexpected API response ({s})"),
@@ -524,6 +524,8 @@ fn listing_endpoints(subreddit: &str) -> Vec<(String, &'static str)> {
     let day = now.saturating_sub(86_400);
     let week = now.saturating_sub(604_800);
     let month = now.saturating_sub(2_592_000);
+    let year = now.saturating_sub(31_536_000);
+    // Order: past week → past day → past month → past year → all-time.
     vec![
         (
             format!(
@@ -535,7 +537,7 @@ fn listing_endpoints(subreddit: &str) -> Vec<(String, &'static str)> {
             format!(
                 "https://api.pullpush.io/reddit/search/submission/?subreddit={subreddit}&sort=desc&sort_type=score&size=100&since={day}"
             ),
-            "top today",
+            "top day",
         ),
         (
             format!(
@@ -545,21 +547,15 @@ fn listing_endpoints(subreddit: &str) -> Vec<(String, &'static str)> {
         ),
         (
             format!(
+                "https://api.pullpush.io/reddit/search/submission/?subreddit={subreddit}&sort=desc&sort_type=score&size=100&since={year}"
+            ),
+            "top year",
+        ),
+        (
+            format!(
                 "https://api.pullpush.io/reddit/search/submission/?subreddit={subreddit}&sort=desc&sort_type=score&size=100"
             ),
             "top all-time",
-        ),
-        (
-            format!(
-                "https://api.pullpush.io/reddit/search/submission/?subreddit={subreddit}&sort=desc&sort_type=created_utc&size=100"
-            ),
-            "recent",
-        ),
-        (
-            format!(
-                "https://arctic-shift.photon-reddit.com/api/posts/search?subreddit={subreddit}&limit=100&sort=desc"
-            ),
-            "archive",
         ),
     ]
 }
@@ -578,17 +574,35 @@ async fn fetch_text(url: &str) -> Result<String, RedditError> {
         .map_err(|e| RedditError::Network(e.to_string()))
 }
 
+/// True if any URL in this post was already used this session.
+pub fn media_seen_in_session(media: &RedditMedia, seen: &[String]) -> bool {
+    media
+        .items
+        .iter()
+        .any(|item| seen.iter().any(|s| s == &item.url))
+}
+
 #[cfg(target_arch = "wasm32")]
 pub async fn fetch_images_with_fallback(
     subreddit: &str,
+    avoid_urls: &[String],
 ) -> Result<(Vec<RedditMedia>, &'static str), RedditError> {
     let mut last_err = RedditError::NoImages;
     for (url, label) in listing_endpoints(subreddit) {
         match fetch_text(&url).await {
             Ok(text) if text.trim_start().starts_with('{') => match extract_images(&text, subreddit)
             {
-                Ok(imgs) if !imgs.is_empty() => return Ok((imgs, label)),
-                Ok(_) => last_err = RedditError::NoImages,
+                Ok(imgs) => {
+                    // Only posts not already shown this session.
+                    let fresh: Vec<RedditMedia> = imgs
+                        .into_iter()
+                        .filter(|m| !media_seen_in_session(m, avoid_urls))
+                        .collect();
+                    if !fresh.is_empty() {
+                        return Ok((fresh, label));
+                    }
+                    last_err = RedditError::NoImages;
+                }
                 Err(e) => last_err = e,
             },
             Ok(_) => last_err = RedditError::Parse("non-JSON body".into()),
@@ -601,6 +615,7 @@ pub async fn fetch_images_with_fallback(
 #[cfg(not(target_arch = "wasm32"))]
 pub async fn fetch_images_with_fallback(
     _subreddit: &str,
+    _avoid_urls: &[String],
 ) -> Result<(Vec<RedditMedia>, &'static str), RedditError> {
     Err(RedditError::Network("browser only".into()))
 }
@@ -610,31 +625,35 @@ pub async fn load_random_image(
     avoid_urls: &[String],
 ) -> Result<(RedditMedia, &'static str), RedditError> {
     let sub = normalize_subreddit(raw_sub).ok_or(RedditError::InvalidSubreddit)?;
-    let (images, window) = fetch_images_with_fallback(&sub).await?;
+    // Walk windows until one has unused, live media.
+    // fetch_images_with_fallback already excludes session-seen posts.
+    let (images, window) = fetch_images_with_fallback(&sub, avoid_urls).await?;
     if images.is_empty() {
         return Err(RedditError::NoImages);
     }
 
-    // Prefer unseen, then any — try several so deleted hosts get skipped.
+    // Random order among unused candidates; skip deleted hosts.
     let mut order: Vec<usize> = (0..images.len()).collect();
-    // Fisher–Yates shuffle
     for i in (1..order.len()).rev() {
         let j = fastrand::usize(..=i);
         order.swap(i, j);
     }
-    order.sort_by_key(|&i| {
-        let u = images[i].primary_url();
-        avoid_urls.iter().any(|a| a == u)
-    });
 
     let mut attempts = 0usize;
     for idx in order {
-        if attempts >= 15 {
+        if attempts >= 20 {
             break;
         }
         attempts += 1;
         let candidate = images[idx].clone();
+        // Double-check session uniqueness (all slide URLs).
+        if media_seen_in_session(&candidate, avoid_urls) {
+            continue;
+        }
         if let Some(live) = filter_live_media(candidate).await {
+            if media_seen_in_session(&live, avoid_urls) {
+                continue;
+            }
             return Ok((live, window));
         }
     }

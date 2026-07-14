@@ -1,4 +1,4 @@
-//! Persistence via localStorage.
+//! Persistence via localStorage / sessionStorage.
 
 #[cfg(target_arch = "wasm32")]
 use crate::difficulty::{clamp_target, DEFAULT_TARGET};
@@ -11,6 +11,8 @@ const BEST_KEY: &str = "rust-game-2048-best";
 const SUB_KEY: &str = "rust-game-2048-subreddit";
 #[cfg(target_arch = "wasm32")]
 const GOAL_KEY: &str = "rust-game-2048-goal";
+#[cfg(target_arch = "wasm32")]
+const SESSION_SEEN_KEY: &str = "rust-game-2048-session-seen";
 
 pub fn load_best() -> u32 {
     #[cfg(target_arch = "wasm32")]
@@ -96,18 +98,13 @@ pub fn save_goal(goal: u32) {
     }
 }
 
-#[cfg(target_arch = "wasm32")]
-const RECENT_IMAGES_KEY: &str = "rust-game-2048-recent-images";
-#[cfg(target_arch = "wasm32")]
-const RECENT_IMAGES_MAX: usize = 40;
-
-/// Recently shown image URLs (avoid repeats).
-pub fn load_recent_image_urls() -> Vec<String> {
+/// URLs already shown this browser session (sessionStorage — clears on tab close).
+pub fn load_session_seen_urls() -> Vec<String> {
     #[cfg(target_arch = "wasm32")]
     {
         web_sys::window()
-            .and_then(|w| w.local_storage().ok().flatten())
-            .and_then(|s| s.get_item(RECENT_IMAGES_KEY).ok().flatten())
+            .and_then(|w| w.session_storage().ok().flatten())
+            .and_then(|s| s.get_item(SESSION_SEEN_KEY).ok().flatten())
             .and_then(|raw| serde_json::from_str(&raw).ok())
             .unwrap_or_default()
     }
@@ -117,21 +114,42 @@ pub fn load_recent_image_urls() -> Vec<String> {
     }
 }
 
-pub fn push_recent_image_url(url: &str) {
+/// Record every media URL from a post as used this session.
+pub fn mark_session_seen_urls(urls: &[String]) {
     #[cfg(target_arch = "wasm32")]
     {
-        let mut list = load_recent_image_urls();
-        list.retain(|u| u != url);
-        list.insert(0, url.to_string());
-        list.truncate(RECENT_IMAGES_MAX);
-        if let Some(storage) = web_sys::window().and_then(|w| w.local_storage().ok().flatten()) {
+        if urls.is_empty() {
+            return;
+        }
+        let mut list = load_session_seen_urls();
+        for u in urls {
+            list.retain(|x| x != u);
+            list.insert(0, u.clone());
+        }
+        // Cap so storage stays reasonable within a long session
+        list.truncate(500);
+        if let Some(storage) = web_sys::window().and_then(|w| w.session_storage().ok().flatten()) {
             if let Ok(raw) = serde_json::to_string(&list) {
-                let _ = storage.set_item(RECENT_IMAGES_KEY, &raw);
+                let _ = storage.set_item(SESSION_SEEN_KEY, &raw);
             }
         }
     }
     #[cfg(not(target_arch = "wasm32"))]
     {
-        let _ = url;
+        let _ = urls;
     }
+}
+
+// Back-compat names used by app during transition
+pub fn load_recent_image_urls() -> Vec<String> {
+    load_session_seen_urls()
+}
+
+pub fn push_recent_image_url(url: &str) {
+    mark_session_seen_urls(&[url.to_string()]);
+}
+
+pub fn push_recent_media_urls(urls: impl IntoIterator<Item = String>) {
+    let v: Vec<String> = urls.into_iter().collect();
+    mark_session_seen_urls(&v);
 }
