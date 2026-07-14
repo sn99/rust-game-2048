@@ -19,7 +19,7 @@ After enabling GitHub Pages (Actions source):
 - Keyboard (arrows / WASD) and touch swipe
 - Classic tile colors and pop animation
 - Optional **subreddit background**: load a random top image/video; it unblurs as your highest tile approaches the goal
-  - **Random sub finder**: pick **SFW** or **NSFW only**, then hit Random for a curated image-friendly community
+  - **Surprise me**: separate **Random SFW** / **Random NSFW (18+)** buttons (not tied to the text box) with a short sub description
   - Uses [Pullpush](https://pullpush.io) / Arctic Shift archives (Reddit blocks direct browser API calls)
 
 ## Develop
