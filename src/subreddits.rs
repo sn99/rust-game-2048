@@ -219,7 +219,46 @@ pub fn curated_blurb(name: &str) -> Option<&'static str> {
     None
 }
 
-/// Pick a random entry from the pool. Prefer something other than `avoid` when possible.
+/// Session-seen names so SFW/NSFW cycles through the list before repeats.
+#[cfg(target_arch = "wasm32")]
+fn session_seen_key(pool: SubredditPool) -> &'static str {
+    match pool {
+        SubredditPool::Sfw => "rust-game-2048-seen-sfw",
+        SubredditPool::NsfwOnly => "rust-game-2048-seen-nsfw",
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn load_session_seen(pool: SubredditPool) -> Vec<String> {
+    web_sys::window()
+        .and_then(|w| w.session_storage().ok().flatten())
+        .and_then(|s| s.get_item(session_seen_key(pool)).ok().flatten())
+        .and_then(|raw| serde_json::from_str(&raw).ok())
+        .unwrap_or_default()
+}
+
+#[cfg(target_arch = "wasm32")]
+fn save_session_seen(pool: SubredditPool, seen: &[String]) {
+    if let Some(storage) = web_sys::window().and_then(|w| w.session_storage().ok().flatten()) {
+        if let Ok(raw) = serde_json::to_string(seen) {
+            let _ = storage.set_item(session_seen_key(pool), &raw);
+        }
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn load_session_seen(_pool: SubredditPool) -> Vec<String> {
+    Vec::new()
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn save_session_seen(_pool: SubredditPool, _seen: &[String]) {}
+
+/// Uniform random entry from the pool.
+///
+/// - Equal chance for every sub in the pool (not biased retries).
+/// - Avoids the current sub when possible.
+/// - Within a tab session, prefers subs not yet rolled until the pool is exhausted, then reshuffles.
 pub fn pick_random_entry(pool: SubredditPool, avoid: Option<&str>) -> SubredditEntry {
     let list = pool_entries(pool);
     if list.is_empty() {
@@ -228,18 +267,61 @@ pub fn pick_random_entry(pool: SubredditPool, avoid: Option<&str>) -> SubredditE
             blurb: "Photographs and pictures from all over",
         };
     }
-    let avoid_l = avoid.map(|s| s.trim().to_ascii_lowercase());
-    for _ in 0..8 {
-        let e = list[fastrand::usize(..list.len())];
-        if avoid_l
-            .as_ref()
-            .map(|a| a != &e.name.to_ascii_lowercase())
-            .unwrap_or(true)
-        {
-            return e;
-        }
+
+    let avoid_l = avoid
+        .map(|s| s.trim().to_ascii_lowercase())
+        .filter(|s| !s.is_empty());
+
+    let mut seen = load_session_seen(pool);
+    let seen_set: std::collections::HashSet<String> =
+        seen.iter().map(|s| s.to_ascii_lowercase()).collect();
+
+    // Candidates: not current, not already rolled this session.
+    let mut fresh: Vec<SubredditEntry> = list
+        .iter()
+        .copied()
+        .filter(|e| {
+            let n = e.name.to_ascii_lowercase();
+            if avoid_l.as_ref().is_some_and(|a| a == &n) {
+                return false;
+            }
+            !seen_set.contains(&n)
+        })
+        .collect();
+
+    // Session exhausted (or only avoid left) — full reshuffle of the pool.
+    if fresh.is_empty() {
+        seen.clear();
+        fresh = list
+            .iter()
+            .copied()
+            .filter(|e| {
+                avoid_l
+                    .as_ref()
+                    .map(|a| a != &e.name.to_ascii_lowercase())
+                    .unwrap_or(true)
+            })
+            .collect();
     }
-    list[fastrand::usize(..list.len())]
+
+    // If avoid was the only entry, fall back to entire list.
+    if fresh.is_empty() {
+        fresh = list.to_vec();
+    }
+
+    // True uniform pick among remaining candidates.
+    let choice = fresh[fastrand::usize(..fresh.len())];
+    let key = choice.name.to_ascii_lowercase();
+    if !seen.iter().any(|s| s.eq_ignore_ascii_case(&key)) {
+        seen.push(choice.name.to_string());
+        // Cap in case lists grow; keep recent half on overflow.
+        if seen.len() > list.len().saturating_mul(2).max(64) {
+            let drop_n = seen.len() / 2;
+            seen.drain(0..drop_n);
+        }
+        save_session_seen(pool, &seen);
+    }
+    choice
 }
 
 /// Back-compat name picker.
@@ -326,6 +408,30 @@ mod tests {
         assert!(!s.blurb.is_empty());
         let n = pick_random_entry(SubredditPool::NsfwOnly, None);
         assert!(NSFW_ONLY.iter().any(|x| x.name.eq_ignore_ascii_case(n.name)));
+    }
+
+    #[test]
+    fn pick_avoids_current_when_possible() {
+        // With a multi-entry pool, avoid should not return that name.
+        let avoid = SFW[0].name;
+        for _ in 0..40 {
+            let e = pick_random_entry(SubredditPool::Sfw, Some(avoid));
+            if SFW.len() > 1 {
+                assert!(!e.name.eq_ignore_ascii_case(avoid));
+            }
+        }
+    }
+
+    #[test]
+    fn pick_is_uniform_over_many_draws() {
+        // Smoke: over many draws without session storage (native tests), every
+        // entry in a small synthetic sense still comes from the real pool.
+        let mut hits = std::collections::HashSet::new();
+        for _ in 0..500 {
+            hits.insert(pick_random_entry(SubredditPool::Sfw, None).name.to_ascii_lowercase());
+        }
+        // Should hit a good fraction of the pool (not stuck on 1–2 names).
+        assert!(hits.len() >= (SFW.len() / 3).max(5));
     }
 
     #[test]

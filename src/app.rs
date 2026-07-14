@@ -175,9 +175,8 @@ pub fn App() -> impl IntoView {
         }
     };
 
-    /// Schedule exactly one extra post prefetch after 5s (cancels prior pending).
+    /// Prefetch next post immediately in the background (no artificial delay).
     let start_preload = move || {
-        // Already have one prefetched slot filled, or a fetch in flight.
         if preloaded.get_untracked().is_some() || preload_busy.get_untracked() {
             return;
         }
@@ -187,54 +186,37 @@ pub fn App() -> impl IntoView {
         }
         let gen = preload_gen.get_untracked().wrapping_add(1);
         preload_gen.set(gen);
+        preload_busy.set(true);
 
-        // 5 second delay before hitting the API again (reduces 429s).
-        set_timeout(5_000, move || {
+        spawn_local(async move {
             if preload_gen.get_untracked() != gen {
-                return; // superseded / cancelled
+                preload_busy.set(false);
+                return;
             }
             if preloaded.get_untracked().is_some() || loading.get_untracked() {
-                return;
-            }
-            if preload_busy.get_untracked() {
-                return;
-            }
-            preload_busy.set(true);
-            spawn_local(async move {
-                if preload_gen.get_untracked() != gen {
-                    preload_busy.set(false);
-                    return;
-                }
-                let mut avoid = load_session_seen_urls();
-                if let Some(cur) = image.get_untracked() {
-                    for it in &cur.items {
-                        avoid.push(it.url.clone());
-                    }
-                }
-                // Only ever keep one prefetched post.
-                if let Some((p, _)) = preloaded.get_untracked() {
-                    for it in &p.items {
-                        avoid.push(it.url.clone());
-                    }
-                    preload_busy.set(false);
-                    return;
-                }
-                match load_random_image(&raw, &avoid).await {
-                    Ok((img, window)) => {
-                        if preload_gen.get_untracked() != gen {
-                            preload_busy.set(false);
-                            return;
-                        }
-                        warm_media_cache(&img);
-                        preloaded.set(Some((img, window)));
-                        // Quiet prefetch — no status spam ("next ready", search path, etc.).
-                    }
-                    Err(_) => {
-                        // Silent background failure (e.g. 429).
-                    }
-                }
                 preload_busy.set(false);
-            });
+                return;
+            }
+            let mut avoid = load_session_seen_urls();
+            if let Some(cur) = image.get_untracked() {
+                for it in &cur.items {
+                    avoid.push(it.url.clone());
+                }
+            }
+            match load_random_image(&raw, &avoid).await {
+                Ok((img, window)) => {
+                    if preload_gen.get_untracked() != gen {
+                        preload_busy.set(false);
+                        return;
+                    }
+                    warm_media_cache(&img);
+                    preloaded.set(Some((img, window)));
+                }
+                Err(_) => {
+                    // Silent background failure (e.g. 429).
+                }
+            }
+            preload_busy.set(false);
         });
     };
 
