@@ -738,21 +738,20 @@ fn iso_utc_from_unix(secs: f64) -> String {
     )
 }
 
-/// Time windows: week → day → month → year → all-time.
-/// Each entry: (label, days_ago, max arctic pages, soft min score for “top”).
+/// Sparse windows: prefer **one** cheap request each. Avoid multi-page storms.
+/// (label, days_ago, max arctic pages, soft min score)
 #[cfg(target_arch = "wasm32")]
 fn time_windows() -> Vec<(&'static str, Option<i64>, usize, i64)> {
     vec![
-        ("top week", Some(7), 12, 50),
-        ("top day", Some(1), 5, 20),
-        ("top month", Some(30), 14, 100),
-        ("top year", Some(365), 14, 200),
-        ("top all-time", None, 10, 500),
+        ("top week", Some(7), 1, 20),
+        ("top month", Some(30), 1, 50),
+        ("top year", Some(365), 1, 100),
+        ("recent", None, 1, 0),
     ]
 }
 
 /// How many highest-scoring public posts we randomize among (true “top” pool).
-const TOP_POOL_SIZE: usize = 35;
+const TOP_POOL_SIZE: usize = 40;
 
 #[cfg(target_arch = "wasm32")]
 thread_local! {
@@ -940,62 +939,88 @@ pub async fn load_random_image(
     raw_sub: &str,
     avoid_urls: &[String],
 ) -> Result<(RedditMedia, &'static str), RedditError> {
-    let sub = normalize_subreddit(raw_sub).ok_or(RedditError::InvalidSubreddit)?;
-    load_random_image_for_sub(&sub, avoid_urls).await
+    let mut batch = load_media_batch(raw_sub, avoid_urls, 1).await?;
+    batch
+        .pop()
+        .ok_or(RedditError::NoImages)
 }
 
-/// Per window (week→day→month→year→all): try score-sorted Pullpush once, else
-/// multi-page Arctic + client score rank. Only pick from the top pool; re-verify
-/// post is still public before accepting CDN media.
-pub async fn load_random_image_for_sub(
+/// Fetch up to `count` ready posts with **minimal API calls**:
+/// ideally 1 listing request + 1 batch id re-verify, then local media probes.
+/// Used to fill the prefetch queue without N separate full searches.
+pub async fn load_media_batch(
+    raw_sub: &str,
+    avoid_urls: &[String],
+    count: usize,
+) -> Result<Vec<(RedditMedia, &'static str)>, RedditError> {
+    let sub = normalize_subreddit(raw_sub).ok_or(RedditError::InvalidSubreddit)?;
+    if count == 0 {
+        return Ok(Vec::new());
+    }
+    load_media_batch_for_sub(&sub, avoid_urls, count).await
+}
+
+#[cfg(target_arch = "wasm32")]
+async fn load_media_batch_for_sub(
     sub: &str,
     avoid_urls: &[String],
-) -> Result<(RedditMedia, &'static str), RedditError> {
-    #[cfg(target_arch = "wasm32")]
-    {
-        let mut last_err = RedditError::NoImages;
+    count: usize,
+) -> Result<Vec<(RedditMedia, &'static str)>, RedditError> {
+    let mut last_err = RedditError::NoImages;
 
-        for (label, days, max_pages, soft_min) in time_windows() {
-            // 1) True score-sorted top from Pullpush (when not rate-limited).
-            if BACKOFF_UNTIL_MS.with(|c| c.get()) <= now_ms() {
-                match fetch_pullpush_window(sub, days).await {
-                    Ok(posts) if !posts.is_empty() => {
-                        match try_pick_live_from_posts(posts, sub, avoid_urls, soft_min).await {
-                            Ok(media) => return Ok((media, label)),
-                            Err(e) => last_err = e,
-                        }
+    for (label, days, max_pages, soft_min) in time_windows() {
+        // Prefer Arctic first (CORS-friendly, less 429 than Pullpush). One page only.
+        match fetch_arctic_window(sub, days, max_pages, soft_min).await {
+            Ok(posts) => {
+                match try_pick_batch_from_posts(posts, sub, avoid_urls, soft_min, count).await {
+                    Ok(media) if !media.is_empty() => {
+                        return Ok(media.into_iter().map(|m| (m, label)).collect());
                     }
-                    Ok(_) => {}
+                    Ok(_) => last_err = RedditError::NoImages,
                     Err(e) => last_err = e,
                 }
             }
+            Err(e) => last_err = e,
+        }
 
-            // 2) Arctic multi-page sample + client score ranking.
-            match fetch_arctic_window(sub, days, max_pages, soft_min).await {
-                Ok(posts) => match try_pick_live_from_posts(posts, sub, avoid_urls, soft_min).await {
-                    Ok(media) => return Ok((media, label)),
-                    Err(e) => last_err = e,
-                },
+        // Optional single Pullpush shot if Arctic was thin (skip if backing off).
+        if BACKOFF_UNTIL_MS.with(|c| c.get()) <= now_ms() {
+            match fetch_pullpush_window(sub, days).await {
+                Ok(posts) if !posts.is_empty() => {
+                    match try_pick_batch_from_posts(posts, sub, avoid_urls, soft_min, count).await {
+                        Ok(media) if !media.is_empty() => {
+                            return Ok(media.into_iter().map(|m| (m, label)).collect());
+                        }
+                        Ok(_) => {}
+                        Err(e) => last_err = e,
+                    }
+                }
+                Ok(_) => {}
                 Err(e) => last_err = e,
             }
         }
-        Err(last_err)
     }
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        let _ = (sub, avoid_urls);
-        Err(RedditError::Network("browser only".into()))
-    }
+    Err(last_err)
 }
 
-/// Pick a random post among the highest-scoring unused public posts whose media still loads.
-async fn try_pick_live_from_posts(
+#[cfg(not(target_arch = "wasm32"))]
+async fn load_media_batch_for_sub(
+    _sub: &str,
+    _avoid_urls: &[String],
+    _count: usize,
+) -> Result<Vec<(RedditMedia, &'static str)>, RedditError> {
+    Err(RedditError::Network("browser only".into()))
+}
+
+/// From one listing response: one batch id check, then up to `max_n` media-probed posts.
+/// No per-candidate API re-checks (those were the multi-request spam).
+async fn try_pick_batch_from_posts(
     posts: Vec<serde_json::Value>,
     sub: &str,
     avoid_urls: &[String],
     soft_min_score: i64,
-) -> Result<RedditMedia, RedditError> {
-    // Drop known-dead early; keep unknowns (e.g. Pullpush missing robot) for Arctic re-check.
+    max_n: usize,
+) -> Result<Vec<RedditMedia>, RedditError> {
     let mut candidates: Vec<serde_json::Value> = posts
         .into_iter()
         .filter(|p| !json_post_is_known_dead(p))
@@ -1022,7 +1047,7 @@ async fn try_pick_live_from_posts(
         return Err(RedditError::NoImages);
     }
 
-    // Batch re-verify BEFORE building media — CDN can outlive the Reddit post page.
+    // Single batch re-verify for the whole top pool.
     let ids: Vec<String> = top.iter().filter_map(json_post_id).collect();
     let public_ids = reverify_public_ids(&ids).await;
     top.retain(|p| {
@@ -1034,7 +1059,6 @@ async fn try_pick_live_from_posts(
         return Err(RedditError::NoImages);
     }
 
-    // Only convert posts Arctic confirmed as still public (robot=true, not removed).
     let mut media_list = posts_json_to_media(top, sub)?;
     media_list.retain(|m| !media_seen_in_session(m, avoid_urls) && !m.id.is_empty());
     if media_list.is_empty() {
@@ -1046,29 +1070,28 @@ async fn try_pick_live_from_posts(
         media_list.swap(i, j);
     }
 
+    let mut out = Vec::with_capacity(max_n.min(media_list.len()));
     let mut attempts = 0usize;
     for candidate in media_list {
-        if attempts >= 25 {
+        if out.len() >= max_n || attempts >= max_n.saturating_mul(4).max(12) {
             break;
         }
         attempts += 1;
         if media_seen_in_session(&candidate, avoid_urls) {
             continue;
         }
-        // Final single-id check right before accepting (catches races / stale batch).
-        if !post_still_public(&candidate.id).await {
-            continue;
-        }
+        // Local CDN/element probe only — no extra archive API per post.
         if let Some(live) = filter_live_media(candidate).await {
             if !media_seen_in_session(&live, avoid_urls) && !live.items.is_empty() {
-                // One more metadata gate after media probe (CDN can lie).
-                if post_still_public(&live.id).await {
-                    return Ok(live);
-                }
+                out.push(live);
             }
         }
     }
-    Err(RedditError::NoImages)
+    if out.is_empty() {
+        Err(RedditError::NoImages)
+    } else {
+        Ok(out)
+    }
 }
 
 /// Batch re-fetch posts by id; return only ids that are still public on Reddit.

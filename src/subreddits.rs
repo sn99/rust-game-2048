@@ -260,147 +260,102 @@ fn ingest_value_posts(map: &mut HashMap<String, SubredditEntry>, want_nsfw: bool
     }
 }
 
-/// Discover image-friendly subreddits from live archives (no hardcoded names).
+/// Persist a catalog + shuffled deck for one pool (session only).
 #[cfg(target_arch = "wasm32")]
-async fn discover_live(pool: SubredditPool) -> Result<Vec<SubredditEntry>, DiscoverError> {
-    let want_nsfw = pool.wants_nsfw();
-    let mut map: HashMap<String, SubredditEntry> = HashMap::new();
+fn persist_pool(pool: SubredditPool, list: &[SubredditEntry]) {
+    if list.is_empty() {
+        return;
+    }
+    if let Ok(raw) = serde_json::to_string(
+        &list
+            .iter()
+            .map(|e| serde_json::json!({"name": e.name, "blurb": e.blurb}))
+            .collect::<Vec<_>>(),
+    ) {
+        session_set(cache_key(pool), &raw);
+    }
+    let mut deck: Vec<String> = list.iter().map(|e| e.name.clone()).collect();
+    fisher_yates(&mut deck);
+    if let Ok(raw) = serde_json::to_string(&deck) {
+        session_set(deck_key(pool), &raw);
+    }
+}
 
-    // --- Pullpush: true top posts by score → diverse popular subs ---
+/// Discover **both** SFW and NSFW from **two** listing requests total (Pullpush + Arctic).
+/// Builds two session decks so SFW/NSFW clicks don't wait on network.
+#[cfg(target_arch = "wasm32")]
+async fn discover_both_pools() -> Result<(Vec<SubredditEntry>, Vec<SubredditEntry>), DiscoverError> {
+    let mut sfw: HashMap<String, SubredditEntry> = HashMap::new();
+    let mut nsfw: HashMap<String, SubredditEntry> = HashMap::new();
+
+    // 1) Pullpush: one top-by-score week sample (popular image-friendly subs).
     let now = (js_sys::Date::now() / 1000.0) as u64;
-    for days in [7_u64, 30, 90] {
-        let since = now.saturating_sub(days.saturating_mul(86_400));
-        let url = format!(
-            "https://api.pullpush.io/reddit/search/submission/?sort=desc&sort_type=score&size=100&since={since}"
+    let since = now.saturating_sub(7 * 86_400);
+    let pp = format!(
+        "https://api.pullpush.io/reddit/search/submission/?sort=desc&sort_type=score&size=100&since={since}"
+    );
+    if let Ok(v) = fetch_json(&pp).await {
+        ingest_value_posts(&mut sfw, false, &v);
+        ingest_value_posts(&mut nsfw, true, &v);
+    }
+
+    // 2) Arctic: one global recent page (good NSFW density + more names).
+    let arctic = "https://arctic-shift.photon-reddit.com/api/posts/search?limit=100&sort=desc";
+    if let Ok(v) = fetch_json(arctic).await {
+        ingest_value_posts(&mut sfw, false, &v);
+        ingest_value_posts(&mut nsfw, true, &v);
+    }
+
+    // Optional third call only if one side is empty.
+    if sfw.is_empty() || nsfw.is_empty() {
+        let since30 = now.saturating_sub(30 * 86_400);
+        let pp2 = format!(
+            "https://api.pullpush.io/reddit/search/submission/?sort=desc&sort_type=score&size=100&since={since30}"
         );
-        if let Ok(v) = fetch_json(&url).await {
-            ingest_value_posts(&mut map, want_nsfw, &v);
-        }
-        if map.len() >= 40 {
-            break;
+        if let Ok(v) = fetch_json(&pp2).await {
+            ingest_value_posts(&mut sfw, false, &v);
+            ingest_value_posts(&mut nsfw, true, &v);
         }
     }
 
-    // --- Arctic: recent posts (global) for more variety / NSFW density ---
-    let mut before = String::new();
-    for page in 0..4u32 {
-        let mut url = "https://arctic-shift.photon-reddit.com/api/posts/search?limit=100&sort=desc"
-            .to_string();
-        if !before.is_empty() {
-            url.push_str(&format!("&before={before}"));
-        }
-        // Randomize slice into the past to avoid always sampling “right now”.
-        if page == 0 {
-            let days_ago = fastrand::u32(0..120);
-            let ms = js_sys::Date::now() - f64::from(days_ago) * 86_400_000.0;
-            let d = js_sys::Date::new(&wasm_bindgen::JsValue::from_f64(ms));
-            let after = format!(
-                "{:04}-{:02}-{:02}",
-                d.get_utc_full_year() as i32,
-                d.get_utc_month() as u32 + 1,
-                d.get_utc_date() as u32
-            );
-            url.push_str(&format!("&after={after}"));
-        }
-        match fetch_json(&url).await {
-            Ok(v) => {
-                let arr = v.get("data").and_then(|d| d.as_array()).cloned().unwrap_or_default();
-                if arr.is_empty() {
-                    break;
-                }
-                ingest_value_posts(&mut map, want_nsfw, &v);
-                let mut oldest = f64::MAX;
-                for p in &arr {
-                    if let Some(c) = p.get("created_utc").and_then(|x| x.as_f64()) {
-                        oldest = oldest.min(c);
-                    }
-                }
-                if oldest < f64::MAX {
-                    let d = js_sys::Date::new(&wasm_bindgen::JsValue::from_f64(oldest * 1000.0));
-                    before = format!(
-                        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}",
-                        d.get_utc_full_year() as i32,
-                        d.get_utc_month() as u32 + 1,
-                        d.get_utc_date() as u32,
-                        d.get_utc_hours() as u32,
-                        d.get_utc_minutes() as u32,
-                        d.get_utc_seconds() as u32
-                    );
-                } else {
-                    break;
-                }
-            }
-            Err(_) => break,
-        }
-        if map.len() >= 80 {
-            break;
-        }
-    }
-
-    // --- Arctic prefix search: random letter prefixes (not a name list) ---
-    const ALPHA: &[u8] = b"abcdefghijklmnopqrstuvwxyz";
-    for _ in 0..8 {
-        let a = ALPHA[fastrand::usize(..ALPHA.len())] as char;
-        let b = ALPHA[fastrand::usize(..ALPHA.len())] as char;
-        let pref = format!("{a}{b}");
-        let url = format!(
-            "https://arctic-shift.photon-reddit.com/api/subreddits/search?subreddit={pref}&limit=25"
-        );
-        if let Ok(v) = fetch_json(&url).await {
-            if let Some(arr) = v.get("data").and_then(|d| d.as_array()) {
-                for p in arr {
-                    let over18 = p.get("over18").and_then(|x| x.as_bool()).unwrap_or(false);
-                    if over18 != want_nsfw {
-                        continue;
-                    }
-                    let name = p
-                        .get("display_name")
-                        .and_then(|x| x.as_str())
-                        .unwrap_or("")
-                        .trim();
-                    if name.is_empty() {
-                        continue;
-                    }
-                    // Prefer communities that allow images when the field exists.
-                    if let Some(false) = p.get("allow_images").and_then(|x| x.as_bool()) {
-                        continue;
-                    }
-                    let subs = p.get("subscribers").and_then(|x| x.as_u64()).unwrap_or(0);
-                    if subs < 500 {
-                        continue;
-                    }
-                    let key = name.to_ascii_lowercase();
-                    let blurb = p
-                        .get("public_description")
-                        .and_then(|x| x.as_str())
-                        .map(str::trim)
-                        .filter(|s| !s.is_empty())
-                        .unwrap_or("")
-                        .to_string();
-                    map.entry(key).or_insert_with(|| SubredditEntry {
-                        name: name.to_string(),
-                        blurb,
-                    });
-                }
-            }
-        }
-    }
-
-    if map.is_empty() {
+    if sfw.is_empty() && nsfw.is_empty() {
         return Err(DiscoverError::Empty);
     }
 
-    let mut list: Vec<SubredditEntry> = map.into_values().collect();
-    // Enrich a few blurbs? too slow — leave as-is; chrome can fetch description.
+    let sfw_list: Vec<_> = sfw.into_values().collect();
+    let nsfw_list: Vec<_> = nsfw.into_values().collect();
+    persist_pool(SubredditPool::Sfw, &sfw_list);
+    persist_pool(SubredditPool::NsfwOnly, &nsfw_list);
+    Ok((sfw_list, nsfw_list))
+}
 
-    // Persist catalog for this session so we don't re-hit APIs every click.
-    if let Ok(raw) = serde_json::to_string(&list.iter().map(|e| {
-        serde_json::json!({"name": e.name, "blurb": e.blurb})
-    }).collect::<Vec<_>>()) {
-        session_set(cache_key(pool), &raw);
+/// Warm both community decks once per session (call at app start).
+pub async fn warm_community_caches() -> Result<(), DiscoverError> {
+    #[cfg(target_arch = "wasm32")]
+    {
+        // Already warm?
+        let sfw_ok = !load_cached_catalog(SubredditPool::Sfw).is_empty();
+        let nsfw_ok = !load_cached_catalog(SubredditPool::NsfwOnly).is_empty();
+        if sfw_ok && nsfw_ok {
+            return Ok(());
+        }
+        discover_both_pools().await?;
+        Ok(())
     }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        Ok(())
+    }
+}
 
-    Ok(list)
+#[cfg(target_arch = "wasm32")]
+async fn discover_live(pool: SubredditPool) -> Result<Vec<SubredditEntry>, DiscoverError> {
+    // Prefer shared dual discovery (1–3 requests total for both pools).
+    let (sfw, nsfw) = discover_both_pools().await?;
+    Ok(match pool {
+        SubredditPool::Sfw => sfw,
+        SubredditPool::NsfwOnly => nsfw,
+    })
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -516,9 +471,11 @@ pub async fn pick_random_subreddit_live(
             blurb: String::new(),
         });
 
-    // Prefer live public description when available.
-    if let Some(desc) = fetch_subreddit_description(&entry.name).await {
-        entry.blurb = desc;
+    // Only one optional description call when discovery left blurb empty.
+    if entry.blurb.is_empty() {
+        if let Some(desc) = fetch_subreddit_description(&entry.name).await {
+            entry.blurb = desc;
+        }
     }
 
     Ok(entry)

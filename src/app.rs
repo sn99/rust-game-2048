@@ -8,9 +8,10 @@ use crate::input::{
 };
 use crate::progress::reveal_progress_range;
 use crate::reddit::{
-    filter_live_media, load_random_image, media_seen_in_session, normalize_subreddit,
-    post_is_still_public, warm_media_cache, RedditMedia,
+    load_media_batch, load_random_image, media_seen_in_session, normalize_subreddit,
+    warm_media_cache, RedditMedia,
 };
+use crate::subreddits::warm_community_caches;
 use crate::storage::{
     load_best, load_goal, load_session_seen_urls, load_subreddit, load_subreddit_pool,
     push_recent_media_urls, save_best, save_goal, save_subreddit,
@@ -176,7 +177,7 @@ pub fn App() -> impl IntoView {
         }
     };
 
-    /// Keep up to PRELOAD_TARGET verified posts ready while the user plays.
+    /// One batched API wave fills missing queue slots (not 1 request per post).
     let fill_preload_queue = move || {
         if loading.get_untracked() || preload_busy.get_untracked() {
             return;
@@ -185,79 +186,57 @@ pub fn App() -> impl IntoView {
         if raw.trim().is_empty() {
             return;
         }
-        if preload_queue.with_untracked(|q| q.len()) >= PRELOAD_TARGET {
+        let have = preload_queue.with_untracked(|q| q.len());
+        if have >= PRELOAD_TARGET {
             return;
         }
-
+        let need = PRELOAD_TARGET - have;
         let gen = preload_gen.get_untracked();
         preload_busy.set(true);
 
         spawn_local(async move {
-            // Fill until target or generation cancelled.
-            while preload_gen.get_untracked() == gen
-                && !loading.get_untracked()
-                && preload_queue.with_untracked(|q| q.len()) < PRELOAD_TARGET
-            {
-                let mut avoid = load_session_seen_urls();
-                if let Some(cur) = image.get_untracked() {
-                    for it in &cur.items {
+            if preload_gen.get_untracked() != gen || loading.get_untracked() {
+                preload_busy.set(false);
+                return;
+            }
+
+            let mut avoid = load_session_seen_urls();
+            if let Some(cur) = image.get_untracked() {
+                for it in &cur.items {
+                    avoid.push(it.url.clone());
+                }
+            }
+            preload_queue.with_untracked(|q| {
+                for (p, _) in q {
+                    for it in &p.items {
                         avoid.push(it.url.clone());
                     }
                 }
-                preload_queue.with_untracked(|q| {
-                    for (p, _) in q {
-                        for it in &p.items {
-                            avoid.push(it.url.clone());
-                        }
-                    }
-                });
+            });
 
-                let result = load_random_image(&raw, &avoid).await;
+            // Single batch path: ~1 listing + 1 id-reverify for up to `need` posts.
+            if let Ok(batch) = load_media_batch(&raw, &avoid, need).await {
                 if preload_gen.get_untracked() != gen {
-                    break;
+                    preload_busy.set(false);
+                    return;
                 }
-                match result {
-                    Ok((img, window)) => {
-                        if !post_is_still_public(&img.id).await {
-                            continue;
-                        }
-                        if preload_gen.get_untracked() != gen {
-                            break;
-                        }
-                        let Some(live) = filter_live_media(img).await else {
-                            continue;
-                        };
-                        if preload_gen.get_untracked() != gen {
-                            break;
-                        }
-                        if media_seen_in_session(&live, &load_session_seen_urls()) {
-                            continue;
-                        }
-                        // Dedup against queue by primary URL / id.
-                        let dup = preload_queue.with_untracked(|q| {
-                            q.iter().any(|(m, _)| m.id == live.id || m.primary_url() == live.primary_url())
-                        });
-                        if dup {
-                            continue;
-                        }
-                        warm_media_cache(&live);
-                        preload_queue.update(|q| {
-                            if q.len() < PRELOAD_TARGET {
-                                q.push((live, window));
-                            }
-                        });
+                for (live, window) in batch {
+                    let dup = preload_queue.with_untracked(|q| {
+                        q.iter()
+                            .any(|(m, _)| m.id == live.id || m.primary_url() == live.primary_url())
+                    });
+                    if dup || media_seen_in_session(&live, &load_session_seen_urls()) {
+                        continue;
                     }
-                    Err(_) => {
-                        // Rate limit / empty — stop this fill wave.
-                        break;
-                    }
+                    warm_media_cache(&live);
+                    preload_queue.update(|q| {
+                        if q.len() < PRELOAD_TARGET {
+                            q.push((live, window));
+                        }
+                    });
                 }
             }
-            if preload_gen.get_untracked() == gen {
-                preload_busy.set(false);
-            } else {
-                preload_busy.set(false);
-            }
+            preload_busy.set(false);
         });
     };
 
@@ -312,27 +291,24 @@ pub fn App() -> impl IntoView {
         loading.set(true);
         spawn_local(async move {
             let avoid = load_session_seen_urls();
-            match load_random_image(&raw, &avoid).await {
-                Ok((img, window)) => {
-                    if post_is_still_public(&img.id).await {
-                        if let Some(live) = filter_live_media(img).await {
-                            if !media_seen_in_session(&live, &load_session_seen_urls()) {
-                                apply_loaded_media(live, window, true);
-                                loading.set(false);
-                                fill_preload_queue();
-                                return;
+            // Fetch current + extras for the queue in one efficient batch when possible.
+            match load_media_batch(&raw, &avoid, 1 + PRELOAD_TARGET).await {
+                Ok(mut batch) if !batch.is_empty() => {
+                    let (first, window) = batch.remove(0);
+                    apply_loaded_media(first, window, true);
+                    for (live, w) in batch {
+                        warm_media_cache(&live);
+                        preload_queue.update(|q| {
+                            if q.len() < PRELOAD_TARGET {
+                                q.push((live, w));
                             }
-                        }
+                        });
                     }
-                    let avoid = load_session_seen_urls();
+                }
+                Ok(_) => {
+                    // Empty batch — last resort single fetch path.
                     match load_random_image(&raw, &avoid).await {
-                        Ok((img2, window2)) => {
-                            if let Some(live) = filter_live_media(img2).await {
-                                apply_loaded_media(live, window2, true);
-                            } else {
-                                load_status.set("Could not load playable media".into());
-                            }
-                        }
+                        Ok((img, window)) => apply_loaded_media(img, window, true),
                         Err(e) => load_status.set(e.to_string()),
                     }
                 }
@@ -350,6 +326,13 @@ pub fn App() -> impl IntoView {
     /// Play / Next / Next game: new board + next post for the current sub.
     let on_play = Callback::new(move |_: ()| {
         load_media();
+    });
+
+    // Warm SFW + NSFW community decks once so random picks are instant.
+    Effect::new(move |_| {
+        spawn_local(async {
+            let _ = warm_community_caches().await;
+        });
     });
 
     let on_clear_image = Callback::new(move |_: ()| {
