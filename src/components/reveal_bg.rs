@@ -1,13 +1,12 @@
 use crate::components::media_view::MediaView;
-use crate::progress::veil_opacity;
+use crate::progress::veil_from_progress;
 use crate::reddit::MediaItem;
 use leptos::prelude::*;
 
 #[component]
 pub fn RevealBackground(
     item: Signal<Option<MediaItem>>,
-    max_tile: Signal<u32>,
-    win_tile: Signal<u32>,
+    progress: Signal<f32>,
 ) -> impl IntoView {
     view! {
         <div class="reveal-bg" aria-hidden="true">
@@ -15,15 +14,14 @@ pub fn RevealBackground(
                 <div class="reveal-bg-fill"></div>
                 <MediaView
                     item=item
-                    max_tile=max_tile
-                    win_tile=win_tile
+                    progress=progress
                     opacity_mul=0.55
                     class="reveal-bg-img"
                 />
                 <div
                     class="reveal-bg-veil"
                     style=move || {
-                        let v = veil_opacity(max_tile.get(), win_tile.get());
+                        let v = veil_from_progress(progress.get());
                         format!("opacity: {v:.3};")
                     }
                 ></div>

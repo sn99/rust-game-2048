@@ -7,7 +7,7 @@ use crate::game::{Board, Direction};
 use crate::input::{
     direction_from_swipe, touch_end_delta, touch_start_coords, use_keyboard, TouchTracker,
 };
-use crate::progress::reveal_progress;
+use crate::progress::reveal_progress_range;
 use crate::reddit::{filter_live_media, load_random_image, media_seen_in_session, warm_media_cache, RedditMedia};
 use crate::storage::{
     load_best, load_goal, load_session_seen_urls, load_subreddit, push_recent_media_urls, save_best,
@@ -33,6 +33,9 @@ pub fn App() -> impl IntoView {
     let touch = RwSignal::new(TouchTracker::default());
     let animating = RwSignal::new(false);
     let goal = RwSignal::new(initial_goal);
+    /// Unblur range: 0% at reveal_from, 100% at reveal_to.
+    let reveal_from = RwSignal::new(2u32);
+    let reveal_to = RwSignal::new(initial_goal);
 
     let subreddit = RwSignal::new(load_subreddit());
     let image = RwSignal::new(None::<RedditMedia>);
@@ -64,8 +67,16 @@ pub fn App() -> impl IntoView {
     let has_image = Signal::derive(move || image.get().is_some());
     let post_unlocked =
         Signal::derive(move || max_tile.get() >= win_tile.get() && win_tile.get() > 0);
-    let reveal_pct = Signal::derive(move || {
-        (reveal_progress(max_tile.get(), goal.get()) * 100.0).round() as u32
+    let progress = Signal::derive(move || {
+        reveal_progress_range(max_tile.get(), reveal_from.get(), reveal_to.get())
+    });
+    let reveal_pct = Signal::derive(move || (progress.get() * 100.0).round() as u32);
+    let reveal_hint = Signal::derive(move || {
+        format!(
+            "Clears at {} · {}% revealed",
+            reveal_to.get(),
+            reveal_pct.get()
+        )
     });
     let current_item = Signal::derive(move || {
         let list = media_items.get();
@@ -134,13 +145,13 @@ pub fn App() -> impl IntoView {
         board.update(|b| {
             let _ = rng.try_update_value(|r| b.reset_with_goal(r, t));
         });
+        reveal_from.set(2);
+        reveal_to.set(t);
     });
 
-    let keep_going = Callback::new(move |_: ()| {
-        board.update(|b| b.continue_after_win());
-    });
+    // Filled after on_load_image is defined — see bottom wiring.
 
-    let apply_loaded_media = move |img: RedditMedia, window: &'static str| {
+    let apply_loaded_media = move |img: RedditMedia, window: &'static str, reset_board: bool| {
         save_subreddit(&img.subreddit);
         subreddit.set(img.subreddit.clone());
         push_recent_media_urls(img.items.iter().map(|i| i.url.clone()));
@@ -165,12 +176,6 @@ pub fn App() -> impl IntoView {
             };
             format!(" — {t}")
         };
-        let ready = if preloaded.get_untracked().is_some() {
-            ""
-        } else {
-            ""
-        };
-        let _ = ready;
         load_status.set(format!(
             "r/{} · {}{}{}",
             img.subreddit, window, kind_bit, title_bit
@@ -179,10 +184,20 @@ pub fn App() -> impl IntoView {
         image.set(Some(img));
         lightbox_sharp.set(false);
         animating.set(false);
+
         let g = goal.get_untracked();
-        board.update(|b| {
-            let _ = rng.try_update_value(|r| b.reset_with_goal(r, g));
-        });
+        if reset_board {
+            board.update(|b| {
+                let _ = rng.try_update_value(|r| b.reset_with_goal(r, g));
+            });
+            reveal_from.set(2);
+            reveal_to.set(g);
+        } else {
+            // Keep board; new post unblurs over the next doubling of the highest tile.
+            let cur = board.with_untracked(|b| b.max_tile().max(2));
+            reveal_from.set(cur);
+            reveal_to.set(cur.saturating_mul(2).max(g));
+        }
     };
 
     /// Schedule exactly one extra post prefetch after 5s (cancels prior pending).
@@ -254,7 +269,8 @@ pub fn App() -> impl IntoView {
         });
     };
 
-    let on_load_image = Callback::new(move |_: ()| {
+    /// Load next media. `reset_board`: true for New image / Try again; false for Keep going.
+    let load_media = move |reset_board: bool| {
         if loading.get_untracked() {
             return;
         }
@@ -266,27 +282,25 @@ pub fn App() -> impl IntoView {
         spawn_local(async move {
             let mut avoid = load_session_seen_urls();
 
-            // Prefer preloaded, but re-verify it is still alive and unused.
             if let Some((img, window)) = preloaded.get_untracked() {
                 preloaded.set(None);
                 if !media_seen_in_session(&img, &avoid) {
                     if let Some(live) = filter_live_media(img).await {
                         if !media_seen_in_session(&live, &avoid) {
-                            apply_loaded_media(live, window);
+                            apply_loaded_media(live, window, reset_board);
                             loading.set(false);
                             start_preload();
                             return;
                         }
                     }
                 }
-                // Preload was stale/deleted — fall through to full search.
             }
 
             load_status.set("Searching top week → day → month → year → all-time…".into());
             avoid = load_session_seen_urls();
             match load_random_image(&raw, &avoid).await {
                 Ok((img, window)) => {
-                    apply_loaded_media(img, window);
+                    apply_loaded_media(img, window, reset_board);
                     start_preload();
                 }
                 Err(e) => {
@@ -295,6 +309,31 @@ pub fn App() -> impl IntoView {
             }
             loading.set(false);
         });
+    };
+
+    let on_load_image = Callback::new(move |_: ()| {
+        load_media(true);
+    });
+
+    let keep_going = Callback::new(move |_: ()| {
+        board.update(|b| b.continue_after_win());
+        // New post starts blurred; unblurs as you build toward the next double.
+        if !subreddit.get_untracked().trim().is_empty() || image.get_untracked().is_some() {
+            load_media(false);
+        }
+    });
+
+    let try_again = Callback::new(move |_: ()| {
+        animating.set(false);
+        let g = goal.get_untracked();
+        board.update(|b| {
+            let _ = rng.try_update_value(|r| b.reset_with_goal(r, g));
+        });
+        reveal_from.set(2);
+        reveal_to.set(g);
+        if !subreddit.get_untracked().trim().is_empty() || image.get_untracked().is_some() {
+            load_media(true);
+        }
     });
 
     let on_clear_image = Callback::new(move |_: ()| {
@@ -343,14 +382,13 @@ pub fn App() -> impl IntoView {
     };
 
     view! {
-        <RevealBackground item=current_item max_tile=max_tile win_tile=win_tile />
+        <RevealBackground item=current_item progress=progress />
         <Lightbox
             open=lightbox_open
             items=media_items
             image_title=image_title
             slide_index=slide_index
-            max_tile=max_tile
-            win_tile=win_tile
+            progress=progress
             sharp=lightbox_sharp
         />
         <main class="app">
@@ -381,7 +419,7 @@ pub fn App() -> impl IntoView {
                             status=status
                             win_tile=win_tile
                             on_keep_going=keep_going
-                            on_try_again=new_game
+                            on_try_again=try_again
                         />
                         <Show when=move || loading.get()>
                             <div class="board-loading" role="status" aria-live="polite">
@@ -409,9 +447,9 @@ pub fn App() -> impl IntoView {
                         image_permalink=image_permalink
                         slide_index=slide_index
                         post_unlocked=post_unlocked
-                        max_tile=max_tile
-                        win_tile=win_tile
+                        progress=progress
                         reveal_pct=reveal_pct
+                        reveal_hint=reveal_hint
                         on_open_full=on_open_full
                         on_clear=on_clear_image
                     />

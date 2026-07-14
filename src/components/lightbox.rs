@@ -9,8 +9,7 @@ pub fn Lightbox(
     items: Signal<Vec<MediaItem>>,
     image_title: Signal<String>,
     slide_index: RwSignal<usize>,
-    max_tile: Signal<u32>,
-    win_tile: Signal<u32>,
+    progress: Signal<f32>,
     sharp: RwSignal<bool>,
 ) -> impl IntoView {
     let n_slides = Signal::derive(move || items.get().len().max(1));
@@ -71,51 +70,23 @@ pub fn Lightbox(
                     </p>
                     <div class="lightbox-actions">
                         <Show when=move || (n_slides.get() > 1)>
-                            <button
-                                type="button"
-                                class="btn btn-ghost lightbox-btn"
-                                on:click=move |_| {
-                                    let n = n_slides.get();
-                                    slide_index.update(|i| *i = if *i == 0 { n - 1 } else { *i - 1 });
-                                }
-                            >
-                                "‹ Prev"
-                            </button>
-                            <button
-                                type="button"
-                                class="btn btn-ghost lightbox-btn"
-                                on:click=move |_| {
-                                    let n = n_slides.get();
-                                    slide_index.update(|i| *i = (*i + 1) % n);
-                                }
-                            >
-                                "Next ›"
-                            </button>
+                            <button type="button" class="btn btn-ghost lightbox-btn" on:click=move |_| {
+                                let n = n_slides.get();
+                                slide_index.update(|i| *i = if *i == 0 { n - 1 } else { *i - 1 });
+                            }>"‹ Prev"</button>
+                            <button type="button" class="btn btn-ghost lightbox-btn" on:click=move |_| {
+                                let n = n_slides.get();
+                                slide_index.update(|i| *i = (*i + 1) % n);
+                            }>"Next ›"</button>
                         </Show>
-                        <button
-                            type="button"
-                            class="btn btn-ghost lightbox-btn"
-                            on:click=move |_| sharp.update(|s| *s = !*s)
-                        >
+                        <button type="button" class="btn btn-ghost lightbox-btn" on:click=move |_| sharp.update(|s| *s = !*s)>
                             {move || if sharp.get() { "Show progress blur" } else { "Show sharp" }}
                         </button>
-                        <button
-                            type="button"
-                            class="btn btn-ghost lightbox-btn"
-                            on:click=move |_| open.set(false)
-                        >
-                            "Close"
-                        </button>
+                        <button type="button" class="btn btn-ghost lightbox-btn" on:click=move |_| open.set(false)>"Close"</button>
                     </div>
                 </div>
                 <div class="lightbox-stage" on:click=move |ev| ev.stop_propagation()>
-                    <MediaView
-                        item=current_item
-                        max_tile=max_tile
-                        win_tile=win_tile
-                        class="lightbox-img"
-                        sharp=sharp_sig
-                    />
+                    <MediaView item=current_item progress=progress class="lightbox-img" sharp=sharp_sig />
                 </div>
             </div>
         </Show>

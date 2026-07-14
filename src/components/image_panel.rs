@@ -1,5 +1,4 @@
 use crate::components::media_view::MediaView;
-use crate::progress::reveal_progress;
 use crate::reddit::MediaItem;
 use leptos::prelude::*;
 use web_sys::TouchEvent;
@@ -11,9 +10,9 @@ pub fn ImagePanel(
     image_permalink: Signal<Option<String>>,
     slide_index: RwSignal<usize>,
     post_unlocked: Signal<bool>,
-    max_tile: Signal<u32>,
-    win_tile: Signal<u32>,
+    progress: Signal<f32>,
     reveal_pct: Signal<u32>,
+    reveal_hint: Signal<String>,
     on_open_full: Callback<()>,
     on_clear: Callback<()>,
 ) -> impl IntoView {
@@ -117,33 +116,14 @@ pub fn ImagePanel(
                     on:touchstart=on_touch_start
                     on:touchend=on_touch_end
                 >
-                    <MediaView
-                        item=current_item
-                        max_tile=max_tile
-                        win_tile=win_tile
-                        class="image-frame-img"
-                    />
+                    <MediaView item=current_item progress=progress class="image-frame-img" />
                     <div class="image-frame-badge">
                         {move || format!("{}%", reveal_pct.get())}
                     </div>
 
                     <Show when=move || (n_slides.get() > 1)>
-                        <button
-                            type="button"
-                            class="carousel-nav carousel-prev"
-                            aria-label="Previous"
-                            on:click=move |_| step(-1)
-                        >
-                            "‹"
-                        </button>
-                        <button
-                            type="button"
-                            class="carousel-nav carousel-next"
-                            aria-label="Next"
-                            on:click=move |_| step(1)
-                        >
-                            "›"
-                        </button>
+                        <button type="button" class="carousel-nav carousel-prev" aria-label="Previous" on:click=move |_| step(-1)>"‹"</button>
+                        <button type="button" class="carousel-nav carousel-next" aria-label="Next" on:click=move |_| step(1)>"›"</button>
                         <div class="carousel-dots" aria-hidden="true">
                             {move || {
                                 let n = n_slides.get();
@@ -153,11 +133,7 @@ pub fn ImagePanel(
                                         view! {
                                             <button
                                                 type="button"
-                                                class=if i == cur {
-                                                    "carousel-dot carousel-dot-active"
-                                                } else {
-                                                    "carousel-dot"
-                                                }
+                                                class=if i == cur { "carousel-dot carousel-dot-active" } else { "carousel-dot" }
                                                 on:click=move |_| slide_index.set(i)
                                             ></button>
                                         }
@@ -174,19 +150,12 @@ pub fn ImagePanel(
                 <div class="reveal-meter" aria-hidden="true">
                     <div
                         class="reveal-meter-fill"
-                        style=move || {
-                            let p = reveal_progress(max_tile.get(), win_tile.get()) * 100.0;
-                            format!("width: {p:.1}%;")
-                        }
+                        style=move || format!("width: {:.1}%;", progress.get() * 100.0)
                     ></div>
                 </div>
                 <p class="image-panel-hint">
                     {move || {
-                        let base = format!(
-                            "Clears at {} · {}% revealed",
-                            win_tile.get(),
-                            reveal_pct.get()
-                        );
+                        let base = reveal_hint.get();
                         if n_slides.get() > 1 {
                             format!("{base} · swipe gallery")
                         } else {

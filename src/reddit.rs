@@ -56,7 +56,16 @@ impl std::fmt::Display for RedditError {
             RedditError::InvalidSubreddit => {
                 write!(f, "Enter a subreddit name or reddit.com/r/… URL")
             }
-            RedditError::Network(s) => write!(f, "Could not load media ({s})"),
+            RedditError::Network(s) => {
+                if s.contains("429") {
+                    write!(
+                        f,
+                        "Rate limited (HTTP 429). Log in at reddit.com in this browser, wait ~20s, then try Load again."
+                    )
+                } else {
+                    write!(f, "Could not load media ({s})")
+                }
+            }
             RedditError::NoImages => {
                 write!(
                     f,
@@ -709,7 +718,7 @@ async fn fetch_text_with_opts(url: &str, with_cookies: bool) -> Result<String, R
         let retry_ms = 20_000.0;
         BACKOFF_UNTIL_MS.with(|c| c.set(now_ms() + retry_ms));
         return Err(RedditError::Network(
-            "HTTP 429 rate limited — wait ~20s and try again (or stay logged into reddit.com)"
+            "Rate limited (HTTP 429). Open reddit.com and log in in this browser, wait ~20s, then press Load again."
                 .into(),
         ));
     }
