@@ -39,6 +39,8 @@ pub fn App() -> impl IntoView {
     /// Preloaded next media for instant "New image".
     let preloaded = RwSignal::new(None::<(RedditMedia, &'static str)>);
     let preload_busy = RwSignal::new(false);
+    /// Bumped to cancel a pending delayed prefetch.
+    let preload_gen = RwSignal::new(0u32);
     let slide_index = RwSignal::new(0usize);
     let load_status = RwSignal::new(String::new());
     let loading = RwSignal::new(false);
@@ -183,38 +185,72 @@ pub fn App() -> impl IntoView {
         });
     };
 
+    /// Schedule exactly one extra post prefetch after 5s (cancels prior pending).
     let start_preload = move || {
-        if preload_busy.get_untracked() {
+        // Already have one prefetched slot filled, or a fetch in flight.
+        if preloaded.get_untracked().is_some() || preload_busy.get_untracked() {
             return;
         }
         let raw = subreddit.get_untracked();
         if raw.trim().is_empty() {
             return;
         }
-        preload_busy.set(true);
-        spawn_local(async move {
-            let mut avoid = load_session_seen_urls();
-            if let Some(cur) = image.get_untracked() {
-                avoid.push(cur.primary_url().to_string());
+        let gen = preload_gen.get_untracked().wrapping_add(1);
+        preload_gen.set(gen);
+
+        // 5 second delay before hitting the API again (reduces 429s).
+        set_timeout(5_000, move || {
+            if preload_gen.get_untracked() != gen {
+                return; // superseded / cancelled
             }
-            if let Some((p, _)) = preloaded.get_untracked() {
-                avoid.push(p.primary_url().to_string());
+            if preloaded.get_untracked().is_some() || loading.get_untracked() {
+                return;
             }
-            match load_random_image(&raw, &avoid).await {
-                Ok((img, window)) => {
-                    warm_media_cache(&img);
-                    preloaded.set(Some((img, window)));
-                    // Hint that next is ready (don't overwrite error states noisily)
-                    let status = load_status.get_untracked();
-                    if !status.is_empty() && !status.contains("next ready") {
-                        load_status.set(format!("{status} · next ready"));
+            if preload_busy.get_untracked() {
+                return;
+            }
+            preload_busy.set(true);
+            spawn_local(async move {
+                if preload_gen.get_untracked() != gen {
+                    preload_busy.set(false);
+                    return;
+                }
+                let mut avoid = load_session_seen_urls();
+                if let Some(cur) = image.get_untracked() {
+                    for it in &cur.items {
+                        avoid.push(it.url.clone());
                     }
                 }
-                Err(_) => {
-                    preloaded.set(None);
+                // Only ever keep one prefetched post.
+                if let Some((p, _)) = preloaded.get_untracked() {
+                    for it in &p.items {
+                        avoid.push(it.url.clone());
+                    }
+                    preload_busy.set(false);
+                    return;
                 }
-            }
-            preload_busy.set(false);
+                match load_random_image(&raw, &avoid).await {
+                    Ok((img, window)) => {
+                        if preload_gen.get_untracked() != gen {
+                            preload_busy.set(false);
+                            return;
+                        }
+                        warm_media_cache(&img);
+                        preloaded.set(Some((img, window)));
+                        let status = load_status.get_untracked();
+                        if !status.is_empty() && !status.contains("next ready") {
+                            load_status.set(format!("{status} · next ready"));
+                        }
+                    }
+                    Err(_) => {
+                        // Don't spam status on background prefetch failures (e.g. 429).
+                        if preloaded.get_untracked().is_none() {
+                            // leave status as-is
+                        }
+                    }
+                }
+                preload_busy.set(false);
+            });
         });
     };
 
@@ -264,6 +300,8 @@ pub fn App() -> impl IntoView {
     let on_clear_image = Callback::new(move |_: ()| {
         image.set(None);
         preloaded.set(None);
+        preload_gen.update(|g| *g = g.wrapping_add(1));
+        preload_busy.set(false);
         slide_index.set(0);
         lightbox_open.set(false);
         load_status.set(String::new());

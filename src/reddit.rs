@@ -544,54 +544,175 @@ fn now_secs() -> u64 {
     (js_sys::Date::now() / 1000.0) as u64
 }
 
+/// Official Reddit JSON (uses browser cookies if logged in) — tried first.
 #[cfg(target_arch = "wasm32")]
-fn listing_endpoints(subreddit: &str) -> Vec<(String, &'static str)> {
+fn reddit_official_endpoints(subreddit: &str) -> Vec<(String, &'static str, bool)> {
+    // (url, label, with_cookies)
+    let windows = [
+        ("week", "top week"),
+        ("day", "top day"),
+        ("month", "top month"),
+        ("year", "top year"),
+        ("all", "top all-time"),
+    ];
+    let mut out = Vec::new();
+    for (t, label) in windows {
+        // Prefer www with credentials (session cookies when user is logged into Reddit).
+        out.push((
+            format!(
+                "https://www.reddit.com/r/{subreddit}/top.json?t={t}&limit=100&raw_json=1"
+            ),
+            label,
+            true,
+        ));
+        out.push((
+            format!(
+                "https://old.reddit.com/r/{subreddit}/top.json?t={t}&limit=100&raw_json=1"
+            ),
+            label,
+            true,
+        ));
+    }
+    out
+}
+
+/// Pullpush archive fallbacks (rate-limited; often returns 429 if spammed).
+#[cfg(target_arch = "wasm32")]
+fn pullpush_endpoints(subreddit: &str) -> Vec<(String, &'static str, bool)> {
     let now = now_secs();
     let day = now.saturating_sub(86_400);
     let week = now.saturating_sub(604_800);
     let month = now.saturating_sub(2_592_000);
     let year = now.saturating_sub(31_536_000);
-    // Order: past week → past day → past month → past year → all-time.
     vec![
         (
             format!(
                 "https://api.pullpush.io/reddit/search/submission/?subreddit={subreddit}&sort=desc&sort_type=score&size=100&since={week}"
             ),
             "top week",
+            false,
         ),
         (
             format!(
                 "https://api.pullpush.io/reddit/search/submission/?subreddit={subreddit}&sort=desc&sort_type=score&size=100&since={day}"
             ),
             "top day",
+            false,
         ),
         (
             format!(
                 "https://api.pullpush.io/reddit/search/submission/?subreddit={subreddit}&sort=desc&sort_type=score&size=100&since={month}"
             ),
             "top month",
+            false,
         ),
         (
             format!(
                 "https://api.pullpush.io/reddit/search/submission/?subreddit={subreddit}&sort=desc&sort_type=score&size=100&since={year}"
             ),
             "top year",
+            false,
         ),
         (
             format!(
                 "https://api.pullpush.io/reddit/search/submission/?subreddit={subreddit}&sort=desc&sort_type=score&size=100"
             ),
             "top all-time",
+            false,
         ),
     ]
 }
 
 #[cfg(target_arch = "wasm32")]
+fn all_listing_endpoints(subreddit: &str) -> Vec<(String, &'static str, bool)> {
+    let mut v = reddit_official_endpoints(subreddit);
+    v.extend(pullpush_endpoints(subreddit));
+    v
+}
+
+#[cfg(target_arch = "wasm32")]
+thread_local! {
+    static LAST_API_MS: std::cell::Cell<f64> = const { std::cell::Cell::new(0.0) };
+    static BACKOFF_UNTIL_MS: std::cell::Cell<f64> = const { std::cell::Cell::new(0.0) };
+}
+
+#[cfg(target_arch = "wasm32")]
+fn now_ms() -> f64 {
+    js_sys::Date::now()
+}
+
+#[cfg(target_arch = "wasm32")]
+async fn sleep_ms(ms: i32) {
+    use js_sys::Promise;
+    use wasm_bindgen::closure::Closure;
+    use wasm_bindgen::JsCast;
+    use wasm_bindgen::JsValue;
+
+    let promise = Promise::new(&mut |resolve, _reject| {
+        let cb = Closure::once(move || {
+            let _ = resolve.call0(&JsValue::NULL);
+        });
+        let _ = web_sys::window().map(|w| {
+            w.set_timeout_with_callback_and_timeout_and_arguments_0(cb.as_ref().unchecked_ref(), ms)
+        });
+        cb.forget();
+    });
+    let _ = wasm_bindgen_futures::JsFuture::from(promise).await;
+}
+
+/// Space out archive API calls and honor 429 backoff.
+#[cfg(target_arch = "wasm32")]
+async fn wait_rate_limit(min_gap_ms: f64) {
+    let now = now_ms();
+    let backoff = BACKOFF_UNTIL_MS.with(|c| c.get());
+    if now < backoff {
+        sleep_ms((backoff - now).ceil() as i32).await;
+    }
+    let last = LAST_API_MS.with(|c| c.get());
+    let wait = min_gap_ms - (now_ms() - last);
+    if wait > 0.0 {
+        sleep_ms(wait.ceil() as i32).await;
+    }
+    LAST_API_MS.with(|c| c.set(now_ms()));
+}
+
+#[cfg(target_arch = "wasm32")]
 async fn fetch_text(url: &str) -> Result<String, RedditError> {
-    let resp = gloo_net::http::Request::get(url)
+    fetch_text_with_opts(url, false).await
+}
+
+#[cfg(target_arch = "wasm32")]
+async fn fetch_text_with_opts(url: &str, with_cookies: bool) -> Result<String, RedditError> {
+    use web_sys::RequestCredentials;
+
+    // Pullpush / arctic: rate-limit. Official reddit: lighter spacing.
+    let gap = if url.contains("pullpush.io") || url.contains("arctic-shift") {
+        2500.0
+    } else {
+        400.0
+    };
+    wait_rate_limit(gap).await;
+
+    let mut req = gloo_net::http::Request::get(url)
+        .header("Accept", "application/json");
+    if with_cookies {
+        req = req.credentials(RequestCredentials::Include);
+    }
+
+    let resp = req
         .send()
         .await
         .map_err(|e| RedditError::Network(e.to_string()))?;
+
+    if resp.status() == 429 {
+        // Back off aggressively for rate limits
+        let retry_ms = 20_000.0;
+        BACKOFF_UNTIL_MS.with(|c| c.set(now_ms() + retry_ms));
+        return Err(RedditError::Network(
+            "HTTP 429 rate limited — wait ~20s and try again (or stay logged into reddit.com)"
+                .into(),
+        ));
+    }
     if !resp.ok() {
         return Err(RedditError::Network(format!("HTTP {}", resp.status())));
     }
@@ -614,8 +735,8 @@ pub async fn fetch_images_with_fallback(
     avoid_urls: &[String],
 ) -> Result<(Vec<RedditMedia>, &'static str), RedditError> {
     let mut last_err = RedditError::NoImages;
-    for (url, label) in listing_endpoints(subreddit) {
-        match fetch_text(&url).await {
+    for (url, label, with_cookies) in all_listing_endpoints(subreddit) {
+        match fetch_text_with_opts(&url, with_cookies).await {
             Ok(text) if text.trim_start().starts_with('{') => match extract_images(&text, subreddit)
             {
                 Ok(imgs) => {
@@ -662,8 +783,9 @@ pub async fn load_random_image_for_sub(
     #[cfg(target_arch = "wasm32")]
     {
         let mut last_err = RedditError::NoImages;
-        for (url, label) in listing_endpoints(sub) {
-            let text = match fetch_text(&url).await {
+        // Official Reddit (browser login/cookies) first, then rate-limited Pullpush.
+        for (url, label, with_cookies) in all_listing_endpoints(sub) {
+            let text = match fetch_text_with_opts(&url, with_cookies).await {
                 Ok(t) if t.trim_start().starts_with('{') => t,
                 Ok(_) => {
                     last_err = RedditError::Parse("non-JSON body".into());
