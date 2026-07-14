@@ -3,6 +3,7 @@ mod difficulty_bar;
 mod header;
 mod image_panel;
 mod lightbox;
+mod media_view;
 mod overlay;
 mod reveal_bg;
 mod subreddit_bar;

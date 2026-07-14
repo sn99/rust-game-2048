@@ -386,7 +386,9 @@ body {
   border: 1px solid var(--panel-border);
 }
 
-.image-frame-img {
+.image-frame-img,
+video.image-frame-img {
+
   display: block;
   max-width: 100%;
   max-height: min(38vh, 320px);
@@ -720,7 +722,9 @@ body {
   background: radial-gradient(ellipse at center, #ebe3d6 0%, var(--bg-deep) 70%);
 }
 
-.reveal-bg-img {
+.reveal-bg-img,
+video.reveal-bg-img {
+
   position: absolute;
   inset: 0;
   margin: auto;
@@ -803,7 +807,9 @@ body {
   overflow: auto;
 }
 
-.lightbox-img {
+.lightbox-img,
+video.lightbox-img {
+
   display: block;
   max-width: min(96vw, 1200px);
   max-height: calc(100vh - 88px);
@@ -947,7 +953,9 @@ body {
     height: 100%;
   }
 
-  .image-frame-img {
+  .image-frame-img,
+video.image-frame-img {
+
     max-height: 100%;
     max-width: 100%;
   }

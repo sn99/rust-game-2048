@@ -1,23 +1,25 @@
-use crate::progress::{blur_px, image_opacity};
+use crate::components::media_view::MediaView;
+use crate::reddit::MediaItem;
 use leptos::prelude::*;
 use web_sys::KeyboardEvent;
 
 #[component]
 pub fn Lightbox(
     open: RwSignal<bool>,
-    image_urls: Signal<Vec<String>>,
+    items: Signal<Vec<MediaItem>>,
     image_title: Signal<String>,
     slide_index: RwSignal<usize>,
     max_tile: Signal<u32>,
     win_tile: Signal<u32>,
     sharp: RwSignal<bool>,
 ) -> impl IntoView {
-    let n_slides = Signal::derive(move || image_urls.get().len().max(1));
-    let current_url = Signal::derive(move || {
-        let urls = image_urls.get();
-        let i = slide_index.get().min(urls.len().saturating_sub(1));
-        urls.get(i).cloned().unwrap_or_default()
+    let n_slides = Signal::derive(move || items.get().len().max(1));
+    let current_item = Signal::derive(move || {
+        let list = items.get();
+        let i = slide_index.get().min(list.len().saturating_sub(1));
+        list.get(i).cloned()
     });
+    let sharp_sig = Signal::derive(move || sharp.get());
 
     let on_key = move |ev: KeyboardEvent| {
         if !open.get_untracked() {
@@ -42,12 +44,12 @@ pub fn Lightbox(
     };
 
     view! {
-        <Show when=move || open.get() && !image_urls.get().is_empty()>
+        <Show when=move || open.get() && !items.get().is_empty()>
             <div
                 class="lightbox"
                 role="dialog"
                 aria-modal="true"
-                aria-label="Full image view"
+                aria-label="Full media view"
                 tabindex="0"
                 on:click=move |_| open.set(false)
                 on:keydown=on_key
@@ -59,7 +61,7 @@ pub fn Lightbox(
                             let n = n_slides.get();
                             let i = slide_index.get() + 1;
                             if t.is_empty() {
-                                if n > 1 { format!("Image {i}/{n}") } else { "Full image".into() }
+                                if n > 1 { format!("Media {i}/{n}") } else { "Full view".into() }
                             } else if n > 1 {
                                 format!("{t} ({i}/{n})")
                             } else {
@@ -107,21 +109,12 @@ pub fn Lightbox(
                     </div>
                 </div>
                 <div class="lightbox-stage" on:click=move |ev| ev.stop_propagation()>
-                    <img
+                    <MediaView
+                        item=current_item
+                        max_tile=max_tile
+                        win_tile=win_tile
                         class="lightbox-img"
-                        src=move || current_url.get()
-                        alt=move || image_title.get()
-                        style=move || {
-                            if sharp.get() {
-                                "filter: none; opacity: 1;".into()
-                            } else {
-                                let tile = max_tile.get();
-                                let goal = win_tile.get();
-                                let blur = blur_px(tile, goal);
-                                let opacity = image_opacity(tile, goal).max(0.85);
-                                format!("filter: blur({blur:.1}px); opacity: {opacity:.3};")
-                            }
-                        }
+                        sharp=sharp_sig
                     />
                 </div>
             </div>

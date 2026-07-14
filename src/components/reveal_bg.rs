@@ -1,31 +1,24 @@
-use crate::progress::{blur_px, image_opacity, veil_opacity};
+use crate::components::media_view::MediaView;
+use crate::progress::veil_opacity;
+use crate::reddit::MediaItem;
 use leptos::prelude::*;
 
-/// Soft full-viewport ambient image (aspect preserved via contain).
 #[component]
 pub fn RevealBackground(
-    image_url: Signal<Option<String>>,
+    item: Signal<Option<MediaItem>>,
     max_tile: Signal<u32>,
     win_tile: Signal<u32>,
 ) -> impl IntoView {
     view! {
         <div class="reveal-bg" aria-hidden="true">
-            <Show when=move || image_url.get().is_some()>
-                // Dim fill so letterboxing never looks empty
+            <Show when=move || item.get().is_some()>
                 <div class="reveal-bg-fill"></div>
-                <img
+                <MediaView
+                    item=item
+                    max_tile=max_tile
+                    win_tile=win_tile
+                    opacity_mul=0.55
                     class="reveal-bg-img"
-                    src=move || image_url.get().unwrap_or_default()
-                    alt=""
-                    style=move || {
-                        let tile = max_tile.get();
-                        let goal = win_tile.get();
-                        let blur = blur_px(tile, goal);
-                        let opacity = image_opacity(tile, goal) * 0.55;
-                        format!(
-                            "filter: blur({blur:.1}px); opacity: {opacity:.3};"
-                        )
-                    }
                 />
                 <div
                     class="reveal-bg-veil"

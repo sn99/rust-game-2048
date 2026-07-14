@@ -8,7 +8,7 @@ use crate::input::{
     direction_from_swipe, touch_end_delta, touch_start_coords, use_keyboard, TouchTracker,
 };
 use crate::progress::reveal_progress;
-use crate::reddit::{load_random_image, RedditImage};
+use crate::reddit::{load_random_image, warm_media_cache, RedditMedia};
 use crate::storage::{
     load_best, load_goal, load_recent_image_urls, load_subreddit, push_recent_image_url, save_best,
     save_goal, save_subreddit,
@@ -35,7 +35,10 @@ pub fn App() -> impl IntoView {
     let goal = RwSignal::new(initial_goal);
 
     let subreddit = RwSignal::new(load_subreddit());
-    let image = RwSignal::new(None::<RedditImage>);
+    let image = RwSignal::new(None::<RedditMedia>);
+    /// Preloaded next media for instant "New image".
+    let preloaded = RwSignal::new(None::<(RedditMedia, &'static str)>);
+    let preload_busy = RwSignal::new(false);
     let slide_index = RwSignal::new(0usize);
     let load_status = RwSignal::new(String::new());
     let loading = RwSignal::new(false);
@@ -47,28 +50,28 @@ pub fn App() -> impl IntoView {
     let tiles = Signal::derive(move || board.get().tiles().to_vec());
     let max_tile = Signal::derive(move || board.get().max_tile());
     let win_tile = Signal::derive(move || goal.get());
-    let image_urls = Signal::derive(move || {
+    let media_items = Signal::derive(move || {
         image
             .get()
-            .map(|i| i.urls.clone())
+            .map(|i| i.items.clone())
             .unwrap_or_default()
     });
     let image_title =
         Signal::derive(move || image.get().map(|i| i.title.clone()).unwrap_or_default());
     let image_permalink = Signal::derive(move || image.get().map(|i| i.permalink.clone()));
     let has_image = Signal::derive(move || image.get().is_some());
-    let post_unlocked = Signal::derive(move || max_tile.get() >= win_tile.get() && win_tile.get() > 0);
+    let post_unlocked =
+        Signal::derive(move || max_tile.get() >= win_tile.get() && win_tile.get() > 0);
     let reveal_pct = Signal::derive(move || {
         (reveal_progress(max_tile.get(), goal.get()) * 100.0).round() as u32
     });
-    // Ambient + panel current slide
-    let current_image_url = Signal::derive(move || {
-        let urls = image_urls.get();
-        if urls.is_empty() {
+    let current_item = Signal::derive(move || {
+        let list = media_items.get();
+        if list.is_empty() {
             return None;
         }
-        let i = slide_index.get().min(urls.len() - 1);
-        Some(urls[i].clone())
+        let i = slide_index.get().min(list.len() - 1);
+        Some(list[i].clone())
     });
 
     let finish_move = move || {
@@ -132,10 +135,99 @@ pub fn App() -> impl IntoView {
         board.update(|b| b.continue_after_win());
     });
 
+    let apply_loaded_media = move |img: RedditMedia, window: &'static str| {
+        save_subreddit(&img.subreddit);
+        subreddit.set(img.subreddit.clone());
+        push_recent_image_url(img.primary_url());
+        warm_media_cache(&img);
+
+        let kind_bit = if img.has_video() && img.is_multi() {
+            format!(" · {} clips/photos", img.items.len())
+        } else if img.has_video() {
+            " · video".into()
+        } else if img.is_multi() {
+            format!(" · {} photos", img.items.len())
+        } else {
+            String::new()
+        };
+        let title_bit = if img.title.is_empty() {
+            String::new()
+        } else {
+            let t = if img.title.len() > 50 {
+                format!("{}…", &img.title[..47])
+            } else {
+                img.title.clone()
+            };
+            format!(" — {t}")
+        };
+        let ready = if preloaded.get_untracked().is_some() {
+            ""
+        } else {
+            ""
+        };
+        let _ = ready;
+        load_status.set(format!(
+            "r/{} · {}{}{}",
+            img.subreddit, window, kind_bit, title_bit
+        ));
+        slide_index.set(0);
+        image.set(Some(img));
+        lightbox_sharp.set(false);
+        animating.set(false);
+        let g = goal.get_untracked();
+        board.update(|b| {
+            let _ = rng.try_update_value(|r| b.reset_with_goal(r, g));
+        });
+    };
+
+    let start_preload = move || {
+        if preload_busy.get_untracked() {
+            return;
+        }
+        let raw = subreddit.get_untracked();
+        if raw.trim().is_empty() {
+            return;
+        }
+        preload_busy.set(true);
+        spawn_local(async move {
+            let mut avoid = load_recent_image_urls();
+            if let Some(cur) = image.get_untracked() {
+                avoid.push(cur.primary_url().to_string());
+            }
+            if let Some((p, _)) = preloaded.get_untracked() {
+                avoid.push(p.primary_url().to_string());
+            }
+            match load_random_image(&raw, &avoid).await {
+                Ok((img, window)) => {
+                    warm_media_cache(&img);
+                    preloaded.set(Some((img, window)));
+                    // Hint that next is ready (don't overwrite error states noisily)
+                    let status = load_status.get_untracked();
+                    if !status.is_empty() && !status.contains("next ready") {
+                        load_status.set(format!("{status} · next ready"));
+                    }
+                }
+                Err(_) => {
+                    preloaded.set(None);
+                }
+            }
+            preload_busy.set(false);
+        });
+    };
+
     let on_load_image = Callback::new(move |_: ()| {
         if loading.get_untracked() {
             return;
         }
+
+        // Instant path: use preloaded +1
+        if let Some((img, window)) = preloaded.get_untracked() {
+            preloaded.set(None);
+            apply_loaded_media(img, window);
+            start_preload();
+            return;
+        }
+
         let raw = subreddit.get_untracked();
         loading.set(true);
         load_status.set("Searching top week → day → month…".into());
@@ -143,37 +235,8 @@ pub fn App() -> impl IntoView {
             let avoid = load_recent_image_urls();
             match load_random_image(&raw, &avoid).await {
                 Ok((img, window)) => {
-                    save_subreddit(&img.subreddit);
-                    subreddit.set(img.subreddit.clone());
-                    push_recent_image_url(img.primary_url());
-                    let gallery_bit = if img.is_gallery() {
-                        format!(" · {} photos", img.urls.len())
-                    } else {
-                        String::new()
-                    };
-                    let title_bit = if img.title.is_empty() {
-                        String::new()
-                    } else {
-                        let t = if img.title.len() > 50 {
-                            format!("{}…", &img.title[..47])
-                        } else {
-                            img.title.clone()
-                        };
-                        format!(" — {t}")
-                    };
-                    load_status.set(format!(
-                        "r/{} · {}{}{}",
-                        img.subreddit, window, gallery_bit, title_bit
-                    ));
-                    slide_index.set(0);
-                    image.set(Some(img));
-                    lightbox_sharp.set(false);
-                    // New image → fresh puzzle
-                    animating.set(false);
-                    let g = goal.get_untracked();
-                    board.update(|b| {
-                        let _ = rng.try_update_value(|r| b.reset_with_goal(r, g));
-                    });
+                    apply_loaded_media(img, window);
+                    start_preload();
                 }
                 Err(e) => {
                     load_status.set(e.to_string());
@@ -185,6 +248,7 @@ pub fn App() -> impl IntoView {
 
     let on_clear_image = Callback::new(move |_: ()| {
         image.set(None);
+        preloaded.set(None);
         slide_index.set(0);
         lightbox_open.set(false);
         load_status.set(String::new());
@@ -220,10 +284,10 @@ pub fn App() -> impl IntoView {
     };
 
     view! {
-        <RevealBackground image_url=current_image_url max_tile=max_tile win_tile=win_tile />
+        <RevealBackground item=current_item max_tile=max_tile win_tile=win_tile />
         <Lightbox
             open=lightbox_open
-            image_urls=image_urls
+            items=media_items
             image_title=image_title
             slide_index=slide_index
             max_tile=max_tile
@@ -266,7 +330,7 @@ pub fn App() -> impl IntoView {
                         has_image=has_image
                     />
                     <ImagePanel
-                        image_urls=image_urls
+                        items=media_items
                         image_title=image_title
                         image_permalink=image_permalink
                         slide_index=slide_index

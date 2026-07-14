@@ -1,11 +1,12 @@
-use crate::progress::{blur_px, image_opacity, reveal_progress};
+use crate::components::media_view::MediaView;
+use crate::progress::reveal_progress;
+use crate::reddit::MediaItem;
 use leptos::prelude::*;
 use web_sys::TouchEvent;
 
-/// In-game preview with optional gallery swipe.
 #[component]
 pub fn ImagePanel(
-    image_urls: Signal<Vec<String>>,
+    items: Signal<Vec<MediaItem>>,
     image_title: Signal<String>,
     image_permalink: Signal<Option<String>>,
     slide_index: RwSignal<usize>,
@@ -18,11 +19,11 @@ pub fn ImagePanel(
 ) -> impl IntoView {
     let touch_x = RwSignal::new(None::<f64>);
 
-    let n_slides = Signal::derive(move || image_urls.get().len().max(1));
-    let current_url = Signal::derive(move || {
-        let urls = image_urls.get();
-        let i = slide_index.get().min(urls.len().saturating_sub(1));
-        urls.get(i).cloned().unwrap_or_default()
+    let n_slides = Signal::derive(move || items.get().len().max(1));
+    let current_item = Signal::derive(move || {
+        let list = items.get();
+        let i = slide_index.get().min(list.len().saturating_sub(1));
+        list.get(i).cloned()
     });
 
     let step = move |delta: i32| {
@@ -32,8 +33,7 @@ pub fn ImagePanel(
         }
         slide_index.update(|i| {
             let cur = *i as i32;
-            let next = (cur + delta).rem_euclid(n) as usize;
-            *i = next;
+            *i = (cur + delta).rem_euclid(n) as usize;
         });
     };
 
@@ -62,7 +62,7 @@ pub fn ImagePanel(
     };
 
     view! {
-        <Show when=move || !image_urls.get().is_empty()>
+        <Show when=move || !items.get().is_empty()>
             <section class="panel image-panel">
                 <div class="image-panel-head">
                     <div class="image-panel-copy">
@@ -71,7 +71,7 @@ pub fn ImagePanel(
                             {move || {
                                 let t = image_title.get();
                                 if t.is_empty() {
-                                    "Background image".into()
+                                    "Background media".into()
                                 } else if t.len() > 64 {
                                     format!("{}…", &t[..61])
                                 } else {
@@ -103,18 +103,10 @@ pub fn ImagePanel(
                         </Show>
                     </div>
                     <div class="image-panel-actions">
-                        <button
-                            type="button"
-                            class="btn btn-ghost"
-                            on:click=move |_| on_open_full.run(())
-                        >
+                        <button type="button" class="btn btn-ghost" on:click=move |_| on_open_full.run(())>
                             "View full"
                         </button>
-                        <button
-                            type="button"
-                            class="btn btn-ghost"
-                            on:click=move |_| on_clear.run(())
-                        >
+                        <button type="button" class="btn btn-ghost" on:click=move |_| on_clear.run(())>
                             "Clear"
                         </button>
                     </div>
@@ -125,20 +117,11 @@ pub fn ImagePanel(
                     on:touchstart=on_touch_start
                     on:touchend=on_touch_end
                 >
-                    <img
+                    <MediaView
+                        item=current_item
+                        max_tile=max_tile
+                        win_tile=win_tile
                         class="image-frame-img"
-                        src=move || current_url.get()
-                        alt=move || image_title.get()
-                        style=move || {
-                            let tile = max_tile.get();
-                            let goal = win_tile.get();
-                            let blur = blur_px(tile, goal);
-                            let opacity = image_opacity(tile, goal);
-                            format!(
-                                "filter: blur({blur:.1}px); opacity: {opacity:.3};"
-                            )
-                        }
-                        draggable="false"
                     />
                     <div class="image-frame-badge">
                         {move || format!("{}%", reveal_pct.get())}
@@ -148,7 +131,7 @@ pub fn ImagePanel(
                         <button
                             type="button"
                             class="carousel-nav carousel-prev"
-                            aria-label="Previous image"
+                            aria-label="Previous"
                             on:click=move |_| step(-1)
                         >
                             "‹"
@@ -156,7 +139,7 @@ pub fn ImagePanel(
                         <button
                             type="button"
                             class="carousel-nav carousel-next"
-                            aria-label="Next image"
+                            aria-label="Next"
                             on:click=move |_| step(1)
                         >
                             "›"

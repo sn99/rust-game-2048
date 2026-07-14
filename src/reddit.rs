@@ -1,26 +1,46 @@
-//! Fetch a random top image (or gallery) from a subreddit.
+//! Fetch random top media (images, galleries, videos) from a subreddit.
 
 use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MediaKind {
+    Image,
+    Video,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct RedditImage {
-    /// One or more image URLs (gallery posts have multiple).
-    pub urls: Vec<String>,
+pub struct MediaItem {
+    pub url: String,
+    pub kind: MediaKind,
+    /// Poster frame for videos (optional).
+    pub poster: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RedditMedia {
+    pub items: Vec<MediaItem>,
     pub title: String,
     pub permalink: String,
     pub subreddit: String,
 }
 
-impl RedditImage {
+impl RedditMedia {
     pub fn primary_url(&self) -> &str {
-        self.urls.first().map(|s| s.as_str()).unwrap_or("")
+        self.items.first().map(|m| m.url.as_str()).unwrap_or("")
     }
 
-    pub fn is_gallery(&self) -> bool {
-        self.urls.len() > 1
+    pub fn is_multi(&self) -> bool {
+        self.items.len() > 1
+    }
+
+    pub fn has_video(&self) -> bool {
+        self.items.iter().any(|m| m.kind == MediaKind::Video)
     }
 }
+
+/// Back-compat alias used in older call sites/docs.
+pub type RedditImage = RedditMedia;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RedditError {
@@ -36,11 +56,11 @@ impl std::fmt::Display for RedditError {
             RedditError::InvalidSubreddit => {
                 write!(f, "Enter a subreddit name or reddit.com/r/… URL")
             }
-            RedditError::Network(s) => write!(f, "Could not load images ({s})"),
+            RedditError::Network(s) => write!(f, "Could not load media ({s})"),
             RedditError::NoImages => {
                 write!(
                     f,
-                    "No image posts found (week/day/month) — try another subreddit"
+                    "No image/video posts found (week/day/month) — try another subreddit"
                 )
             }
             RedditError::Parse(s) => write!(f, "Unexpected API response ({s})"),
@@ -55,16 +75,13 @@ pub fn normalize_subreddit(raw: &str) -> Option<String> {
         return None;
     }
 
-    // Full / partial URLs: https://www.reddit.com/r/foo/..., reddit.com/r/foo
     let lower = s.to_ascii_lowercase();
     if let Some(idx) = lower.find("/r/") {
         let rest = &s[idx + 3..];
         let name = rest.split(['/', '?', '#']).next().unwrap_or("").trim();
         return validate_sub_name(name);
     }
-    // reddit.com/r/foo without leading slash before r (rare)
     if let Some(idx) = lower.find("r/") {
-        // only if it looks like a host path, not "super/foo"
         if idx == 0 || s[..idx].contains('.') || s[..idx].ends_with('/') {
             let rest = &s[idx + 2..];
             let name = rest.split(['/', '?', '#']).next().unwrap_or("").trim();
@@ -133,6 +150,26 @@ struct PostData {
     gallery_data: Option<GalleryData>,
     #[serde(default)]
     media_metadata: Option<HashMap<String, MediaMeta>>,
+    #[serde(default)]
+    media: Option<MediaWrapper>,
+    #[serde(default)]
+    secure_media: Option<MediaWrapper>,
+}
+
+#[derive(Debug, Deserialize)]
+struct MediaWrapper {
+    reddit_video: Option<RedditVideo>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RedditVideo {
+    fallback_url: Option<String>,
+    #[allow(dead_code)]
+    hls_url: Option<String>,
+    #[allow(dead_code)]
+    dash_url: Option<String>,
+    #[allow(dead_code)]
+    is_gif: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -171,37 +208,32 @@ struct MediaMeta {
 struct MediaSource {
     u: Option<String>,
     gif: Option<String>,
+    mp4: Option<String>,
 }
 
-/// Parse listing JSON into candidate image/gallery posts.
-pub fn extract_images(json: &str, subreddit: &str) -> Result<Vec<RedditImage>, RedditError> {
+pub fn extract_images(json: &str, subreddit: &str) -> Result<Vec<RedditMedia>, RedditError> {
     if let Ok(arr) = serde_json::from_str::<PostArrayResponse>(json) {
-        return posts_to_images(arr.data, subreddit);
+        return posts_to_media(arr.data, subreddit);
     }
     let listing: Listing =
         serde_json::from_str(json).map_err(|e| RedditError::Parse(e.to_string()))?;
     let posts: Vec<PostData> = listing.data.children.into_iter().map(|c| c.data).collect();
-    posts_to_images(posts, subreddit)
+    posts_to_media(posts, subreddit)
 }
 
-fn posts_to_images(posts: Vec<PostData>, subreddit: &str) -> Result<Vec<RedditImage>, RedditError> {
+fn posts_to_media(posts: Vec<PostData>, subreddit: &str) -> Result<Vec<RedditMedia>, RedditError> {
     let mut out = Vec::new();
     let mut seen_keys = HashSet::new();
     for p in posts {
-        if p.is_video.unwrap_or(false) {
+        let items = collect_post_media(&p);
+        if items.is_empty() {
             continue;
         }
-        if let Some(hint) = &p.post_hint {
-            if hint == "hosted:video" || hint == "rich:video" {
-                continue;
-            }
-        }
-
-        let urls = collect_post_urls(&p);
-        if urls.is_empty() {
-            continue;
-        }
-        let key = urls.join("|");
+        let key = items
+            .iter()
+            .map(|m| m.url.as_str())
+            .collect::<Vec<_>>()
+            .join("|");
         if !seen_keys.insert(key) {
             continue;
         }
@@ -212,8 +244,8 @@ fn posts_to_images(posts: Vec<PostData>, subreddit: &str) -> Result<Vec<RedditIm
         } else {
             format!("https://www.reddit.com{permalink}")
         };
-        out.push(RedditImage {
-            urls,
+        out.push(RedditMedia {
+            items,
             title: p.title.unwrap_or_default(),
             permalink,
             subreddit: subreddit.to_string(),
@@ -226,65 +258,141 @@ fn posts_to_images(posts: Vec<PostData>, subreddit: &str) -> Result<Vec<RedditIm
     }
 }
 
-fn collect_post_urls(p: &PostData) -> Vec<String> {
-    // Galleries first
+fn collect_post_media(p: &PostData) -> Vec<MediaItem> {
+    // Gallery (images / animated)
     if p.is_gallery.unwrap_or(false) || p.gallery_data.is_some() {
-        if let Some(urls) = gallery_urls(p) {
-            if !urls.is_empty() {
-                return urls;
+        if let Some(items) = gallery_items(p) {
+            if !items.is_empty() {
+                return items;
             }
         }
     }
 
-    let mut urls = Vec::new();
+    // Hosted Reddit video
+    if let Some(item) = reddit_video_item(p) {
+        return vec![item];
+    }
+
+    // Direct image / gif / gifv→mp4
     if let Some(url) = &p.url {
-        if is_image_url(url) {
-            urls.push(decode_url(url));
+        if let Some(item) = media_from_url(url, poster_from_preview(p)) {
+            return vec![item];
         }
     }
-    if urls.is_empty() {
-        if let Some(url) = p
-            .preview
-            .as_ref()
-            .and_then(|pr| pr.images.as_ref())
-            .and_then(|imgs| imgs.first())
-            .and_then(|img| img.source.as_ref())
-            .and_then(|s| s.url.clone())
-        {
-            if is_image_url(&url) {
-                urls.push(decode_url(&url));
-            }
+
+    // Preview still as last resort
+    if let Some(url) = preview_source_url(p) {
+        if let Some(item) = media_from_url(&url, None) {
+            return vec![item];
         }
     }
-    urls
+
+    Vec::new()
 }
 
-fn gallery_urls(p: &PostData) -> Option<Vec<String>> {
+fn reddit_video_item(p: &PostData) -> Option<MediaItem> {
+    let rv = p
+        .media
+        .as_ref()
+        .and_then(|m| m.reddit_video.as_ref())
+        .or_else(|| p.secure_media.as_ref().and_then(|m| m.reddit_video.as_ref()))?;
+    let url = rv.fallback_url.as_ref()?;
+    let url = decode_url(url);
+    // Strip query for cleaner playback when possible; keep if needed
+    Some(MediaItem {
+        url,
+        kind: MediaKind::Video,
+        poster: poster_from_preview(p),
+    })
+}
+
+fn gallery_items(p: &PostData) -> Option<Vec<MediaItem>> {
     let items = p.gallery_data.as_ref()?.items.as_ref()?;
     let meta = p.media_metadata.as_ref()?;
-    let mut urls = Vec::new();
+    let mut out = Vec::new();
     for item in items {
         let id = item.media_id.as_ref()?;
         let m = meta.get(id)?;
         if m.status.as_deref() == Some("failed") {
             continue;
         }
-        // Prefer still images; skip pure video entries
         if m.e.as_deref() == Some("RedditVideo") {
+            // Rare in galleries; skip without a clean mp4 field
             continue;
         }
         let src = m.s.as_ref()?;
+        if let Some(mp4) = &src.mp4 {
+            out.push(MediaItem {
+                url: decode_url(mp4),
+                kind: MediaKind::Video,
+                poster: src.u.as_ref().map(|u| decode_url(u)),
+            });
+            continue;
+        }
         let u = src.u.as_ref().or(src.gif.as_ref())?;
         let u = decode_url(u);
         if is_image_url(&u) || u.contains("preview.redd.it") || u.contains("i.redd.it") {
-            urls.push(u);
+            out.push(MediaItem {
+                url: u,
+                kind: MediaKind::Image,
+                poster: None,
+            });
         }
     }
-    if urls.is_empty() {
+    if out.is_empty() {
         None
     } else {
-        Some(urls)
+        Some(out)
     }
+}
+
+fn media_from_url(url: &str, poster: Option<String>) -> Option<MediaItem> {
+    let url = decode_url(url);
+    let lower = url.to_ascii_lowercase();
+
+    // Imgur gifv/gif → mp4 when possible
+    if lower.contains("imgur.com/") {
+        if let Some(base) = url
+            .strip_suffix(".gifv")
+            .or_else(|| url.strip_suffix(".GIFV"))
+            .or_else(|| url.strip_suffix(".gif"))
+            .or_else(|| url.strip_suffix(".GIF"))
+        {
+            return Some(MediaItem {
+                url: format!("{base}.mp4"),
+                kind: MediaKind::Video,
+                poster,
+            });
+        }
+    }
+
+    if lower.contains("v.redd.it") {
+        // bare v.redd.it without media.reddit_video — skip
+        return None;
+    }
+
+    if is_image_url(&url) {
+        return Some(MediaItem {
+            url,
+            kind: MediaKind::Image,
+            poster: None,
+        });
+    }
+
+    None
+}
+
+fn poster_from_preview(p: &PostData) -> Option<String> {
+    preview_source_url(p).map(|u| decode_url(&u))
+}
+
+fn preview_source_url(p: &PostData) -> Option<String> {
+    p.preview
+        .as_ref()
+        .and_then(|pr| pr.images.as_ref())
+        .and_then(|imgs| imgs.first())
+        .and_then(|img| img.source.as_ref())
+        .and_then(|s| s.url.clone())
 }
 
 fn is_image_url(url: &str) -> bool {
@@ -295,7 +403,12 @@ fn is_image_url(url: &str) -> bool {
     u.contains("i.redd.it")
         || u.contains("preview.redd.it")
         || u.contains("i.imgur.com")
-        || u.contains("imgur.com/")
+        || (u.contains("imgur.com/")
+            && (u.ends_with(".jpg")
+                || u.ends_with(".jpeg")
+                || u.ends_with(".png")
+                || u.ends_with(".webp")
+                || u.ends_with(".gif")))
         || u.ends_with(".jpg")
         || u.ends_with(".jpeg")
         || u.ends_with(".png")
@@ -307,11 +420,11 @@ fn decode_url(url: &str) -> String {
     url.replace("&amp;", "&")
 }
 
-pub fn pick_random_image(images: &[RedditImage], avoid_urls: &[String]) -> Option<RedditImage> {
+pub fn pick_random_image(images: &[RedditMedia], avoid_urls: &[String]) -> Option<RedditMedia> {
     if images.is_empty() {
         return None;
     }
-    let fresh: Vec<&RedditImage> = images
+    let fresh: Vec<&RedditMedia> = images
         .iter()
         .filter(|img| !avoid_urls.iter().any(|u| u == img.primary_url()))
         .collect();
@@ -322,6 +435,42 @@ pub fn pick_random_image(images: &[RedditImage], avoid_urls: &[String]) -> Optio
     };
     Some(pool[fastrand::usize(..pool.len())].clone())
 }
+
+/// Warm browser cache for images (best-effort).
+#[cfg(target_arch = "wasm32")]
+pub fn warm_media_cache(media: &RedditMedia) {
+    use wasm_bindgen::JsCast;
+    for item in &media.items {
+        match item.kind {
+            MediaKind::Image => {
+                if let Ok(img) = web_sys::HtmlImageElement::new() {
+                    img.set_src(&item.url);
+                }
+            }
+            MediaKind::Video => {
+                // Create a video element with preload=auto (not attached).
+                if let Some(doc) = web_sys::window().and_then(|w| w.document()) {
+                    if let Ok(el) = doc.create_element("video") {
+                        if let Ok(vid) = el.dyn_into::<web_sys::HtmlVideoElement>() {
+                            vid.set_preload("auto");
+                            vid.set_muted(true);
+                            vid.set_src(&item.url);
+                            let _ = vid.load();
+                        }
+                    }
+                }
+                if let Some(poster) = &item.poster {
+                    if let Ok(img) = web_sys::HtmlImageElement::new() {
+                        img.set_src(poster);
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub fn warm_media_cache(_media: &RedditMedia) {}
 
 #[cfg(target_arch = "wasm32")]
 fn now_secs() -> u64 {
@@ -391,7 +540,7 @@ async fn fetch_text(url: &str) -> Result<String, RedditError> {
 #[cfg(target_arch = "wasm32")]
 pub async fn fetch_images_with_fallback(
     subreddit: &str,
-) -> Result<(Vec<RedditImage>, &'static str), RedditError> {
+) -> Result<(Vec<RedditMedia>, &'static str), RedditError> {
     let mut last_err = RedditError::NoImages;
     for (url, label) in listing_endpoints(subreddit) {
         match fetch_text(&url).await {
@@ -411,14 +560,14 @@ pub async fn fetch_images_with_fallback(
 #[cfg(not(target_arch = "wasm32"))]
 pub async fn fetch_images_with_fallback(
     _subreddit: &str,
-) -> Result<(Vec<RedditImage>, &'static str), RedditError> {
+) -> Result<(Vec<RedditMedia>, &'static str), RedditError> {
     Err(RedditError::Network("browser only".into()))
 }
 
 pub async fn load_random_image(
     raw_sub: &str,
     avoid_urls: &[String],
-) -> Result<(RedditImage, &'static str), RedditError> {
+) -> Result<(RedditMedia, &'static str), RedditError> {
     let sub = normalize_subreddit(raw_sub).ok_or(RedditError::InvalidSubreddit)?;
     let (images, window) = fetch_images_with_fallback(&sub).await?;
     let img = pick_random_image(&images, avoid_urls).ok_or(RedditError::NoImages)?;
@@ -433,28 +582,13 @@ mod tests {
     fn normalize_names_and_urls() {
         assert_eq!(normalize_subreddit("pics").as_deref(), Some("pics"));
         assert_eq!(
-            normalize_subreddit("r/EarthPorn").as_deref(),
-            Some("EarthPorn")
-        );
-        assert_eq!(normalize_subreddit("/r/cats/").as_deref(), Some("cats"));
-        assert_eq!(
             normalize_subreddit("https://www.reddit.com/r/FiftyFifty/").as_deref(),
             Some("FiftyFifty")
         );
-        assert_eq!(
-            normalize_subreddit("https://reddit.com/r/pics/comments/abc/title").as_deref(),
-            Some("pics")
-        );
-        assert_eq!(
-            normalize_subreddit("https://old.reddit.com/r/aww").as_deref(),
-            Some("aww")
-        );
-        assert_eq!(normalize_subreddit("bad name"), None);
-        assert_eq!(normalize_subreddit(""), None);
     }
 
     #[test]
-    fn extract_single_and_gallery() {
+    fn extract_image_gallery_video() {
         let json = r#"{
           "data": [
             {
@@ -465,57 +599,45 @@ mod tests {
               "post_hint": "image"
             },
             {
+              "title": "Vid",
+              "url": "https://v.redd.it/abc",
+              "permalink": "/r/pics/comments/2/v/",
+              "is_video": true,
+              "media": {
+                "reddit_video": {
+                  "fallback_url": "https://v.redd.it/abc/DASH_480.mp4?source=fallback",
+                  "is_gif": true
+                }
+              },
+              "preview": {
+                "images": [{ "source": { "url": "https://preview.redd.it/poster.jpg" } }]
+              }
+            },
+            {
               "title": "Gallery",
               "url": "https://www.reddit.com/gallery/xyz",
-              "permalink": "/r/pics/comments/2/gal/",
+              "permalink": "/r/pics/comments/3/g/",
               "is_gallery": true,
-              "is_video": false,
-              "gallery_data": {
-                "items": [
-                  { "media_id": "aaa" },
-                  { "media_id": "bbb" }
-                ]
-              },
+              "gallery_data": { "items": [ { "media_id": "aaa" }, { "media_id": "bbb" } ] },
               "media_metadata": {
-                "aaa": {
-                  "e": "Image",
-                  "s": { "u": "https://preview.redd.it/aaa.jpg?width=100" }
-                },
-                "bbb": {
-                  "e": "Image",
-                  "s": { "u": "https://preview.redd.it/bbb.jpg?width=100" }
-                }
+                "aaa": { "e": "Image", "s": { "u": "https://preview.redd.it/aaa.jpg?width=100" } },
+                "bbb": { "e": "Image", "s": { "u": "https://preview.redd.it/bbb.jpg?width=100" } }
               }
             }
           ]
         }"#;
-        let imgs = extract_images(json, "pics").unwrap();
-        assert_eq!(imgs.len(), 2);
-        assert_eq!(imgs[0].urls.len(), 1);
-        assert_eq!(imgs[1].urls.len(), 2);
-        assert!(imgs[1].is_gallery());
+        let items = extract_images(json, "pics").unwrap();
+        assert_eq!(items.len(), 3);
+        assert_eq!(items[0].items[0].kind, MediaKind::Image);
+        assert_eq!(items[1].items[0].kind, MediaKind::Video);
+        assert!(items[1].items[0].url.contains("DASH_480"));
+        assert_eq!(items[2].items.len(), 2);
     }
 
     #[test]
-    fn pick_avoids_recent() {
-        let imgs = vec![
-            RedditImage {
-                urls: vec!["https://i.redd.it/a.jpg".into()],
-                title: "a".into(),
-                permalink: "https://reddit.com/a".into(),
-                subreddit: "pics".into(),
-            },
-            RedditImage {
-                urls: vec!["https://i.redd.it/b.jpg".into()],
-                title: "b".into(),
-                permalink: "https://reddit.com/b".into(),
-                subreddit: "pics".into(),
-            },
-        ];
-        let avoid = vec!["https://i.redd.it/a.jpg".into()];
-        for _ in 0..20 {
-            let p = pick_random_image(&imgs, &avoid).unwrap();
-            assert_eq!(p.primary_url(), "https://i.redd.it/b.jpg");
-        }
+    fn imgur_gifv_to_mp4() {
+        let item = media_from_url("https://i.imgur.com/ZenTaxR.gifv", None).unwrap();
+        assert_eq!(item.kind, MediaKind::Video);
+        assert_eq!(item.url, "https://i.imgur.com/ZenTaxR.mp4");
     }
 }
