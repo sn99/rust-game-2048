@@ -113,36 +113,61 @@ body {
   opacity: 0.85;
 }
 
-/* Unified chrome (title + scores + goal + sub) */
+/* Unified chrome: scores | goal | sub — packed, translucent seps */
 .chrome {
-  padding: 10px 12px 8px;
+  padding: 8px 12px 6px;
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 5px;
 }
 
 .chrome-row {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 8px 12px;
   min-width: 0;
 }
 
 .chrome-row-main {
-  justify-content: flex-start;
+  gap: 0;
+  flex-wrap: nowrap;
+  align-items: stretch;
+}
+
+.chrome-zone {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 8px;
+  min-width: 0;
+  padding: 2px 0;
+}
+
+/* Translucent vertical divider between zones */
+.chrome-sep {
+  flex: 0 0 auto;
+  width: 1px;
+  align-self: stretch;
+  margin: 4px 12px;
+  background: linear-gradient(
+    180deg,
+    transparent 0%,
+    rgba(119, 110, 101, 0.22) 12%,
+    rgba(119, 110, 101, 0.28) 50%,
+    rgba(119, 110, 101, 0.22) 88%,
+    transparent 100%
+  );
+  border-radius: 1px;
 }
 
 .chrome-brand {
-  display: flex;
-  align-items: center;
-  gap: 10px;
   flex: 0 0 auto;
-  min-width: 0;
+  gap: 8px;
+  padding-right: 2px;
 }
 
 .title {
-  font-size: clamp(28px, 6vw, 40px);
+  font-size: clamp(26px, 4.5vw, 34px);
   font-weight: 800;
   line-height: 0.95;
   margin: 0;
@@ -154,72 +179,91 @@ body {
 
 .scores {
   display: flex;
-  gap: 6px;
+  gap: 5px;
   flex-shrink: 0;
 }
 
 .score-box {
   background: var(--score-bg);
-  border-radius: 8px;
-  min-width: 56px;
-  padding: 5px 10px;
+  border-radius: 7px;
+  min-width: 50px;
+  padding: 4px 8px;
   text-align: center;
   color: #fff;
   box-shadow: inset 0 -2px 0 rgba(0, 0, 0, 0.08);
 }
 
 .score-label {
-  font-size: 10px;
+  font-size: 9px;
   font-weight: 800;
-  letter-spacing: 0.06em;
+  letter-spacing: 0.05em;
   opacity: 0.9;
 }
 
 .score-value {
-  font-size: 18px;
+  font-size: 16px;
   font-weight: 800;
   line-height: 1.15;
 }
 
-.chrome-goals {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 6px 8px;
-  flex: 1 1 220px;
-  min-width: 0;
+.chrome-zone-label {
+  margin: 0;
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  opacity: 0.55;
+  flex: 0 0 auto;
 }
 
-.chrome-sub {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 6px;
-  flex: 1 1 280px;
+/* Goals grow to use mid space, content packs from the left */
+.chrome-goals {
+  flex: 1 1 auto;
   min-width: 0;
+  gap: 5px 6px;
+}
+
+.chrome-goals .difficulty-buttons {
+  flex: 1 1 auto;
+  flex-wrap: nowrap;
+  gap: 4px;
+  min-width: 0;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.chrome-goals .difficulty-buttons::-webkit-scrollbar {
+  display: none;
+}
+
+/* Sub cluster: hug content on the right, no empty flex grow */
+.chrome-sub {
+  flex: 0 1 auto;
   justify-content: flex-end;
+  gap: 5px;
+  padding-left: 2px;
 }
 
 .chrome-input {
-  flex: 1 1 100px;
-  min-width: 88px;
-  max-width: 160px;
-  padding: 6px 10px;
-  font-size: 14px;
+  flex: 0 1 130px;
+  min-width: 96px;
+  max-width: 150px;
+  padding: 5px 9px;
+  font-size: 13px;
 }
 
 .chrome .btn-load,
 .chrome .btn-new {
-  padding: 7px 12px;
-  font-size: 13px;
+  padding: 6px 10px;
+  font-size: 12.5px;
 }
 
 .chrome .btn-discover {
-  padding: 7px 10px;
-  font-size: 12.5px;
+  padding: 6px 9px;
+  font-size: 12px;
   font-weight: 700;
   border: 0;
-  border-radius: 8px;
+  border-radius: 7px;
   color: #f9f6f2;
   cursor: pointer;
   white-space: nowrap;
@@ -238,27 +282,52 @@ body {
   cursor: wait;
 }
 
+/* Meta: blurb uses free space (left), status right — no forced ellipsis */
 .chrome-row-meta {
-  justify-content: flex-end;
-  min-height: 0;
+  gap: 10px;
+  align-items: flex-start;
+  padding-top: 1px;
 }
 
-.chrome-meta {
+.chrome-meta-blurb {
   margin: 0;
-  flex: 1 1 100%;
-  text-align: right;
-  font-size: 12.5px;
+  flex: 1 1 auto;
+  min-width: 0;
+  text-align: left;
+  font-size: 12px;
   line-height: 1.4;
-  opacity: 0.85;
-  /* Use available width — wrap instead of ellipsis when there's room */
+  opacity: 0.82;
   white-space: normal;
   overflow: visible;
   word-break: break-word;
-  max-width: 100%;
 }
 
-.chrome-label {
+.chrome-meta-sep {
+  display: none; /* shown on desktop when both sides present */
+  flex: 0 0 auto;
+  width: 1px;
+  align-self: stretch;
+  min-height: 1em;
+  margin: 2px 0;
+  background: rgba(119, 110, 101, 0.2);
+}
+
+.chrome-meta-status {
   margin: 0;
+  flex: 0 1 42%;
+  min-width: 0;
+  text-align: right;
+  font-size: 12px;
+  line-height: 1.4;
+  opacity: 0.78;
+  white-space: normal;
+  overflow: visible;
+  word-break: break-word;
+}
+
+.chrome-meta-status:empty,
+.chrome-meta-blurb:empty {
+  display: none;
 }
 
 .btn {
@@ -320,7 +389,7 @@ body {
 .difficulty-buttons {
   display: flex;
   flex-wrap: wrap;
-  gap: 6px;
+  gap: 5px;
 }
 
 .diff-btn {
@@ -905,35 +974,44 @@ video.lightbox-img {
   .chrome {
     flex-shrink: 0;
     margin: 0;
-    padding: 6px 10px 5px;
+    padding: 6px 12px 5px;
     gap: 4px;
   }
 
+  .chrome-row-main {
+    flex-wrap: nowrap;
+  }
+
+  .chrome-sep {
+    margin: 2px 14px;
+  }
+
   .title {
-    font-size: clamp(28px, 3vw, 36px);
+    font-size: clamp(26px, 2.6vw, 32px);
   }
 
   .score-box {
-    min-width: 52px;
-    padding: 4px 8px;
+    min-width: 48px;
+    padding: 3px 7px;
   }
 
   .score-value {
-    font-size: 16px;
+    font-size: 15px;
   }
 
   .score-label {
-    font-size: 9px;
+    font-size: 8px;
   }
 
   .btn-new {
-    padding: 6px 10px;
-    font-size: 13px;
+    padding: 5px 10px;
+    font-size: 12.5px;
   }
 
+  /* Number-only goal chips — full label still on title hover */
   .diff-btn {
-    min-width: 48px;
-    padding: 3px 6px;
+    min-width: 0;
+    padding: 4px 7px;
   }
 
   .diff-value {
@@ -941,27 +1019,33 @@ video.lightbox-img {
   }
 
   .diff-name {
-    font-size: 8px;
+    display: none;
   }
 
   .chrome-input {
-    max-width: 150px;
+    max-width: 140px;
     padding: 5px 8px;
-    font-size: 13px;
+    font-size: 12.5px;
   }
 
   .chrome .btn-load,
   .chrome .btn-discover {
-    padding: 6px 9px;
+    padding: 5px 8px;
     font-size: 12px;
   }
 
-  .chrome-meta {
+  .chrome-meta-sep {
+    display: block;
+  }
+
+  .chrome-meta-blurb,
+  .chrome-meta-status {
     font-size: 12px;
-    text-align: right;
-    white-space: normal;
-    overflow: visible;
-    text-overflow: unset;
+  }
+
+  .chrome-meta-status {
+    flex: 0 1 38%;
+    max-width: 420px;
   }
 
   .play-layout {
@@ -1057,9 +1141,35 @@ video.lightbox-img {
   }
 }
 
+@media (max-width: 900px) {
+  .chrome-row-main {
+    flex-wrap: wrap;
+    row-gap: 8px;
+  }
+
+  .chrome-sep {
+    display: none;
+  }
+
+  .chrome-goals {
+    flex: 1 1 100%;
+    order: 3;
+  }
+
+  .chrome-sub {
+    flex: 1 1 auto;
+    justify-content: flex-start;
+  }
+
+  .chrome-goals .difficulty-buttons {
+    flex-wrap: wrap;
+  }
+}
+
 @media (max-width: 480px) {
   .chrome-sub {
     justify-content: flex-start;
+    flex: 1 1 100%;
   }
 
   .chrome-input {
@@ -1067,8 +1177,14 @@ video.lightbox-img {
     flex: 1 1 120px;
   }
 
-  .chrome-meta {
+  .chrome-meta-status {
+    flex: 1 1 100%;
     text-align: left;
+  }
+
+  .chrome-row-meta {
+    flex-direction: column;
+    gap: 2px;
   }
 
   .btn-new {

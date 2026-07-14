@@ -84,7 +84,7 @@ pub fn Chrome(
     view! {
         <header class="panel chrome compact-panel" aria-label="Game controls">
             <div class="chrome-row chrome-row-main">
-                <div class="chrome-brand">
+                <div class="chrome-zone chrome-brand">
                     <h1 class="title">{move || win_tile.get().to_string()}</h1>
                     <div class="scores">
                         <div class="score-box">
@@ -98,8 +98,10 @@ pub fn Chrome(
                     </div>
                 </div>
 
-                <div class="chrome-goals" role="group" aria-label="Difficulty — win target">
-                    <span class="panel-title inline-title chrome-label">"Goal"</span>
+                <div class="chrome-sep" aria-hidden="true"></div>
+
+                <div class="chrome-zone chrome-goals" role="group" aria-label="Difficulty — win target">
+                    <span class="chrome-zone-label">"Goal"</span>
                     <div class="difficulty-buttons">
                         {TARGETS
                             .iter()
@@ -127,7 +129,9 @@ pub fn Chrome(
                     </div>
                 </div>
 
-                <div class="chrome-sub" role="group" aria-label="Subreddit">
+                <div class="chrome-sep" aria-hidden="true"></div>
+
+                <div class="chrome-zone chrome-sub" role="group" aria-label="Subreddit">
                     <span class="subreddit-prefix" aria-hidden="true">"r/"</span>
                     <input
                         id="subreddit-input"
@@ -199,47 +203,32 @@ pub fn Chrome(
                 </div>
             </div>
 
-            <div class="chrome-row chrome-row-meta">
-                <p class="chrome-meta" aria-live="polite" title=move || {
-                    // Full text for hover when long
-                    let name = subreddit.get();
-                    let name = name.trim().to_string();
-                    let desc = description.get();
-                    let st = status.get();
-                    format_meta(&name, &desc, &st)
-                }>
+            <div class="chrome-row chrome-row-meta" aria-live="polite">
+                <p class="chrome-meta-blurb">
                     {move || {
                         let name = subreddit.get();
                         let name = name.trim().to_string();
                         let desc = description.get();
+                        if name.is_empty() {
+                            String::new()
+                        } else if desc.is_empty() {
+                            format!("r/{name}")
+                        } else {
+                            format!("r/{name} — {desc}")
+                        }
+                    }}
+                </p>
+                <span class="chrome-meta-sep" aria-hidden="true"></span>
+                <p class="chrome-meta-status">
+                    {move || {
+                        let name = subreddit.get();
                         let st = status.get();
-                        format_meta(&name, &desc, &st)
+                        strip_redundant_sub_prefix(st.trim(), name.trim())
                     }}
                 </p>
             </div>
         </header>
     }
-}
-
-/// One clean line: `r/sub — blurb · load status` without duplicating the sub name.
-fn format_meta(name: &str, desc: &str, status: &str) -> String {
-    let mut parts: Vec<String> = Vec::new();
-    if !name.is_empty() {
-        if desc.is_empty() {
-            parts.push(format!("r/{name}"));
-        } else {
-            parts.push(format!("r/{name} — {desc}"));
-        }
-    }
-    let st = status.trim();
-    if !st.is_empty() {
-        // Drop leading "r/foo · " if status still has it from older format.
-        let cleaned = strip_redundant_sub_prefix(st, name);
-        if !cleaned.is_empty() && !parts.iter().any(|p| p == &cleaned) {
-            parts.push(cleaned);
-        }
-    }
-    parts.join(" · ")
 }
 
 fn strip_redundant_sub_prefix(status: &str, name: &str) -> String {
