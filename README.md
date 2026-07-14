@@ -13,6 +13,7 @@ After enabling GitHub Pages (Actions source):
 ## Features
 
 - Classic 4×4 rules (slide, merge once, 90%/10% spawn of 2/4)
+- **Difficulty / goal**: win at 64, 128, 256, 512, 1024, 2048, or 4096
 - Score + best (persisted in `localStorage`)
 - Win at 2048 with **Keep going**, then **Game over**
 - Keyboard (arrows / WASD) and touch swipe

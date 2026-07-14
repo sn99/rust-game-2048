@@ -1,11 +1,16 @@
-use crate::components::{BoardView, Header, Overlay, RevealBackground, SubredditBar};
+use crate::components::{
+    BoardView, DifficultyBar, Header, Overlay, RevealBackground, SubredditBar,
+};
+use crate::difficulty::clamp_target;
 use crate::game::{Board, Direction};
 use crate::input::{
     direction_from_swipe, touch_end_delta, touch_start_coords, use_keyboard, TouchTracker,
 };
 use crate::progress::reveal_progress;
 use crate::reddit::{load_random_image, RedditImage};
-use crate::storage::{load_best, load_subreddit, save_best, save_subreddit};
+use crate::storage::{
+    load_best, load_goal, load_subreddit, save_best, save_goal, save_subreddit,
+};
 use leptos::prelude::*;
 use wasm_bindgen::closure::Closure;
 use wasm_bindgen::JsCast;
@@ -18,10 +23,15 @@ const SLIDE_MS: i32 = 100;
 #[component]
 pub fn App() -> impl IntoView {
     let rng = StoredValue::new(fastrand::Rng::new());
-    let board = RwSignal::new(rng.try_update_value(|r| Board::new(r)).expect("rng"));
+    let initial_goal = load_goal();
+    let board = RwSignal::new(
+        rng.try_update_value(|r| Board::new(r, initial_goal))
+            .expect("rng"),
+    );
     let best = RwSignal::new(load_best());
     let touch = RwSignal::new(TouchTracker::default());
     let animating = RwSignal::new(false);
+    let goal = RwSignal::new(initial_goal);
 
     let subreddit = RwSignal::new(load_subreddit());
     let image = RwSignal::new(None::<RedditImage>);
@@ -32,9 +42,12 @@ pub fn App() -> impl IntoView {
     let status = Signal::derive(move || board.get().status());
     let tiles = Signal::derive(move || board.get().tiles().to_vec());
     let max_tile = Signal::derive(move || board.get().max_tile());
+    let win_tile = Signal::derive(move || goal.get());
     let image_url = Signal::derive(move || image.get().map(|i| i.url));
     let has_image = Signal::derive(move || image.get().is_some());
-    let reveal_pct = Signal::derive(move || (reveal_progress(max_tile.get()) * 100.0).round() as u32);
+    let reveal_pct = Signal::derive(move || {
+        (reveal_progress(max_tile.get(), goal.get()) * 100.0).round() as u32
+    });
 
     let finish_move = move || {
         board.update(|b| {
@@ -74,8 +87,22 @@ pub fn App() -> impl IntoView {
 
     let new_game = Callback::new(move |_: ()| {
         animating.set(false);
+        let g = goal.get_untracked();
         board.update(|b| {
-            let _ = rng.try_update_value(|r| b.reset(r));
+            let _ = rng.try_update_value(|r| b.reset_with_goal(r, g));
+        });
+    });
+
+    let on_select_goal = Callback::new(move |t: u32| {
+        let t = clamp_target(t);
+        if t == goal.get_untracked() {
+            return;
+        }
+        goal.set(t);
+        save_goal(t);
+        animating.set(false);
+        board.update(|b| {
+            let _ = rng.try_update_value(|r| b.reset_with_goal(r, t));
         });
     });
 
@@ -146,9 +173,15 @@ pub fn App() -> impl IntoView {
     };
 
     view! {
-        <RevealBackground image_url=image_url max_tile=max_tile />
+        <RevealBackground image_url=image_url max_tile=max_tile win_tile=win_tile />
         <main class="app">
-            <Header score=score best=best.into() on_new_game=new_game />
+            <Header
+                score=score
+                best=best.into()
+                win_tile=win_tile
+                on_new_game=new_game
+            />
+            <DifficultyBar target=win_tile on_select=on_select_goal />
             <SubredditBar
                 subreddit=subreddit
                 status=load_status.into()
@@ -165,7 +198,12 @@ pub fn App() -> impl IntoView {
                 on:touchmove=on_touch_move
             >
                 <BoardView tiles=tiles />
-                <Overlay status=status on_keep_going=keep_going on_try_again=new_game />
+                <Overlay
+                    status=status
+                    win_tile=win_tile
+                    on_keep_going=keep_going
+                    on_try_again=new_game
+                />
             </div>
             <p class="how-to">
                 <strong>"How to play: "</strong>
@@ -173,9 +211,10 @@ pub fn App() -> impl IntoView {
                 <strong>"arrow keys"</strong>
                 " or "
                 <strong>"swipe"</strong>
-                " to move the tiles. When two tiles with the same number touch, they "
-                <strong>"merge into one!"</strong>
-                " Optional: load a subreddit image and watch it unblur toward 2048."
+                " to move the tiles. Pick a "
+                <strong>"goal"</strong>
+                " below the title (64 is easiest, 4096 is hardest). "
+                "Optional: load a subreddit image — it unblurs as you approach your goal."
             </p>
             <p class="credit">
                 "Built with Rust + Leptos · Inspired by "

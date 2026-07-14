@@ -1,5 +1,6 @@
 mod app;
 mod components;
+mod difficulty;
 mod game;
 mod input;
 mod progress;

@@ -13,7 +13,7 @@ pub enum Direction {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GameStatus {
     Playing,
-    /// Just reached 2048 for the first time; show win overlay.
+    /// Just reached the win target for the first time; show win overlay.
     Won,
     /// No legal moves remain.
     Over,
@@ -39,18 +39,21 @@ pub struct Board {
     next_id: u64,
     score: u32,
     status: GameStatus,
-    /// True after the first 2048 tile appears (suppresses re-win overlay).
+    /// Win when a tile reaches this value (64, 128, …).
+    win_tile: u32,
+    /// True after the goal was reached once (suppresses re-win overlay).
     won_once: bool,
 }
 
 impl Board {
-    /// New game with two random tiles.
-    pub fn new(rng: &mut fastrand::Rng) -> Self {
+    /// New game with two random tiles. `win_tile` is the goal (e.g. 256, 2048).
+    pub fn new(rng: &mut fastrand::Rng, win_tile: u32) -> Self {
         let mut board = Self {
             tiles: Vec::new(),
             next_id: 1,
             score: 0,
             status: GameStatus::Playing,
+            win_tile: win_tile.max(2),
             won_once: false,
         };
         board.spawn_tile(rng, true);
@@ -66,17 +69,24 @@ impl Board {
             next_id: 1,
             score: 0,
             status: GameStatus::Playing,
+            win_tile: 2048,
             won_once: false,
         }
     }
 
     #[cfg(test)]
     pub fn from_cells(cells: [[u32; 4]; 4]) -> Self {
+        Self::from_cells_with_goal(cells, 2048)
+    }
+
+    #[cfg(test)]
+    pub fn from_cells_with_goal(cells: [[u32; 4]; 4], win_tile: u32) -> Self {
         let mut board = Self {
             tiles: Vec::new(),
             next_id: 1,
             score: 0,
             status: GameStatus::Playing,
+            win_tile: win_tile.max(2),
             won_once: false,
         };
         for r in 0..4 {
@@ -112,6 +122,15 @@ impl Board {
         self.tiles.iter().map(|t| t.value).max().unwrap_or(0)
     }
 
+    pub fn win_tile(&self) -> u32 {
+        self.win_tile
+    }
+
+    /// Change goal without reshuffling (used when starting a new game at a new level).
+    pub fn set_win_tile(&mut self, win_tile: u32) {
+        self.win_tile = win_tile.max(2);
+    }
+
     pub fn status(&self) -> GameStatus {
         self.status
     }
@@ -134,7 +153,13 @@ impl Board {
 
     /// Reset for New Game (caller keeps best score separately).
     pub fn reset(&mut self, rng: &mut fastrand::Rng) {
-        *self = Self::new(rng);
+        let goal = self.win_tile;
+        *self = Self::new(rng, goal);
+    }
+
+    /// New game at a chosen difficulty goal.
+    pub fn reset_with_goal(&mut self, rng: &mut fastrand::Rng, win_tile: u32) {
+        *self = Self::new(rng, win_tile);
     }
 
     /// Slide/merge only (no spawn). Returns whether anything changed.
@@ -211,8 +236,7 @@ impl Board {
     }
 
     fn check_win_only(&mut self) {
-        let has_2048 = self.tiles.iter().any(|t| t.value >= 2048);
-        if has_2048 && !self.won_once {
+        if self.max_tile() >= self.win_tile && !self.won_once {
             self.status = GameStatus::Won;
             self.won_once = true;
         }
@@ -232,8 +256,7 @@ impl Board {
 
     #[cfg(test)]
     fn refresh_status_after_setup(&mut self) {
-        let has_2048 = self.tiles.iter().any(|t| t.value >= 2048);
-        if has_2048 {
+        if self.max_tile() >= self.win_tile {
             self.won_once = true;
         }
         if !self.has_moves() {
@@ -364,7 +387,7 @@ mod tests {
 
     #[test]
     fn new_has_two_tiles() {
-        let b = Board::new(&mut rng());
+        let b = Board::new(&mut rng(), 2048);
         assert_eq!(b.tiles().len(), 2);
         assert_eq!(b.score(), 0);
         assert_eq!(b.status(), GameStatus::Playing);
@@ -430,6 +453,23 @@ mod tests {
         b.continue_after_win();
         assert_eq!(b.status(), GameStatus::Playing);
         assert!(b.won_once());
+    }
+
+    #[test]
+    fn win_on_custom_goal() {
+        let mut b = Board::from_cells_with_goal(
+            [
+                [32, 32, 0, 0],
+                [0, 0, 0, 0],
+                [0, 0, 0, 0],
+                [0, 0, 0, 0],
+            ],
+            64,
+        );
+        b.try_move_with_spawn(Direction::Left, &mut rng());
+        assert_eq!(b.cells()[0][0], 64);
+        assert_eq!(b.status(), GameStatus::Won);
+        assert_eq!(b.win_tile(), 64);
     }
 
     #[test]

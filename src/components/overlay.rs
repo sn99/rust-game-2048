@@ -4,6 +4,7 @@ use leptos::prelude::*;
 #[component]
 pub fn Overlay(
     status: Signal<GameStatus>,
+    win_tile: Signal<u32>,
     on_keep_going: Callback<()>,
     on_try_again: Callback<()>,
 ) -> impl IntoView {
@@ -23,9 +24,9 @@ pub fn Overlay(
                 <div class="overlay-inner">
                     <p class="overlay-message">
                         {move || match status.get() {
-                            GameStatus::Won => "You win!",
-                            GameStatus::Over => "Game over!",
-                            GameStatus::Playing => "",
+                            GameStatus::Won => format!("You hit {}!", win_tile.get()),
+                            GameStatus::Over => "Game over!".into(),
+                            GameStatus::Playing => String::new(),
                         }}
                     </p>
                     <div class="overlay-actions">

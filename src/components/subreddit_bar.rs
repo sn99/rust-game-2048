@@ -60,7 +60,7 @@ pub fn SubredditBar(
             </p>
             <Show when=move || has_image.get()>
                 <p class="subreddit-hint">
-                    "Image unblurs as your highest tile climbs — "
+                    "Image unblurs toward your goal as tiles climb — "
                     {move || format!("{}% revealed", reveal_pct.get())}
                 </p>
             </Show>
