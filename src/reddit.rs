@@ -151,8 +151,11 @@ struct PostData {
     url: Option<String>,
     permalink: Option<String>,
     author: Option<String>,
-    /// Set when mods/admins removed the post (or spam/etc.).
+    selftext: Option<String>,
+    /// Set when mods/admins/reddit removed the post.
     removed_by_category: Option<String>,
+    /// false ≈ removed from public listing / deleted for robots.
+    is_robot_indexable: Option<bool>,
     #[allow(dead_code)]
     over_18: Option<bool>,
     post_hint: Option<String>,
@@ -277,10 +280,14 @@ fn posts_to_media(posts: Vec<PostData>, subreddit: &str) -> Result<Vec<RedditMed
 
 
 fn post_is_unavailable(p: &PostData) -> bool {
+    // Arctic/Reddit mark removed posts this way (media CDN may still serve files).
     if p.removed_by_category.is_some() {
         return true;
     }
-    // Common tombstone titles from deleted/removed posts.
+    // Not indexable almost always means removed/spam/deleted for public view.
+    if p.is_robot_indexable == Some(false) {
+        return true;
+    }
     if let Some(title) = p.title.as_deref().map(str::trim) {
         let tl = title.to_ascii_lowercase();
         if matches!(
@@ -290,30 +297,16 @@ fn post_is_unavailable(p: &PostData) -> bool {
             return true;
         }
     }
-    if let Some(author) = p.author.as_deref() {
-        if author.eq_ignore_ascii_case("[deleted]") || author.eq_ignore_ascii_case("[removed]") {
-            // Keep only if hosted media metadata still looks intact; otherwise skip.
-            let has_video = p
-                .media
-                .as_ref()
-                .and_then(|m| m.reddit_video.as_ref())
-                .or_else(|| p.secure_media.as_ref().and_then(|m| m.reddit_video.as_ref()))
-                .and_then(|v| v.fallback_url.as_ref())
-                .is_some();
-            let has_gallery = p
-                .gallery_data
-                .as_ref()
-                .and_then(|g| g.items.as_ref())
-                .map(|i| !i.is_empty())
-                .unwrap_or(false);
-            let url = p.url.as_deref().unwrap_or("");
-            let has_direct = is_image_url(url) || url.contains("v.redd.it");
-            if !has_video && !has_gallery && !has_direct {
-                return true;
-            }
+    if let Some(st) = p.selftext.as_deref().map(str::trim) {
+        if matches!(st, "[deleted]" | "[removed]") {
+            return true;
         }
     }
-    // Dead link patterns Reddit leaves behind.
+    if let Some(author) = p.author.as_deref() {
+        if author.eq_ignore_ascii_case("[deleted]") || author.eq_ignore_ascii_case("[removed]") {
+            return true;
+        }
+    }
     if let Some(url) = p.url.as_deref() {
         if url_looks_deleted(url) {
             return true;
@@ -332,39 +325,66 @@ fn url_looks_deleted(url: &str) -> bool {
         || u.contains("style_emote")
 }
 
+fn is_video_post(p: &PostData) -> bool {
+    if p.is_video.unwrap_or(false) {
+        return true;
+    }
+    match p.post_hint.as_deref() {
+        Some("hosted:video") | Some("rich:video") => return true,
+        _ => {}
+    }
+    p.url
+        .as_deref()
+        .map(|u| {
+            let u = u.to_ascii_lowercase();
+            u.contains("v.redd.it") || u.contains("youtube.com") || u.contains("youtu.be")
+        })
+        .unwrap_or(false)
+}
+
 fn collect_post_media(p: &PostData) -> Vec<MediaItem> {
-    // Gallery (images / animated)
+    // Video posts: ONLY if we have a progressive MP4 we can actually play.
+    // Never fall back to a still/poster — user asked not to fetch unusable video stills.
+    if is_video_post(p) {
+        return match playable_reddit_video(p) {
+            Some(item) => vec![item],
+            None => Vec::new(), // skip gfycat/youtube/broken video entirely
+        };
+    }
+
+    // Image galleries (skip pure video entries inside)
     if p.is_gallery.unwrap_or(false) || p.gallery_data.is_some() {
         if let Some(items) = gallery_items(p) {
             if !items.is_empty() {
                 return items;
             }
         }
+        return Vec::new();
     }
 
-    // Hosted Reddit video
-    if let Some(item) = reddit_video_item(p) {
-        return vec![item];
-    }
-
-    // Direct image / gif / gifv→mp4
+    // Direct still images only (or easily playable imgur mp4 from gifv)
     if let Some(url) = &p.url {
-        if let Some(item) = media_from_url(url, poster_from_preview(p)) {
+        if let Some(item) = media_from_url(url) {
             return vec![item];
         }
     }
 
-    // Preview still as last resort
+    // Preview still only for non-video image posts
     if let Some(url) = preview_source_url(p) {
-        if let Some(item) = media_from_url(&url, None) {
-            return vec![item];
+        if is_image_url(&url) && !url_looks_deleted(&url) {
+            return vec![MediaItem {
+                url: decode_url(&url),
+                kind: MediaKind::Image,
+                poster: None,
+            }];
         }
     }
 
     Vec::new()
 }
 
-fn reddit_video_item(p: &PostData) -> Option<MediaItem> {
+/// Only progressive MP4 fallbacks from Reddit-hosted video (autoplay-friendly).
+fn playable_reddit_video(p: &PostData) -> Option<MediaItem> {
     let rv = p
         .media
         .as_ref()
@@ -372,12 +392,29 @@ fn reddit_video_item(p: &PostData) -> Option<MediaItem> {
         .or_else(|| p.secure_media.as_ref().and_then(|m| m.reddit_video.as_ref()))?;
     let url = rv.fallback_url.as_ref()?;
     let url = decode_url(url);
-    // Strip query for cleaner playback when possible; keep if needed
+    if !url_is_playable_mp4(&url) {
+        return None;
+    }
     Some(MediaItem {
         url,
         kind: MediaKind::Video,
-        poster: poster_from_preview(p),
+        // Poster optional for <video poster=> only — never used as standalone image.
+        poster: poster_from_preview(p).filter(|u| is_image_url(u)),
     })
+}
+
+fn url_is_playable_mp4(url: &str) -> bool {
+    let u = url.to_ascii_lowercase();
+    // Reddit DASH progressive fallbacks and imgur mp4
+    if u.contains("youtube") || u.contains("youtu.be") || u.contains("gfycat") || u.contains("redgifs")
+    {
+        return false;
+    }
+    u.contains(".mp4")
+        || u.contains("dash_")
+        || u.contains("/dash")
+        || u.ends_with("mp4")
+        || (u.contains("v.redd.it") && u.contains("dash"))
 }
 
 fn gallery_items(p: &PostData) -> Option<Vec<MediaItem>> {
@@ -399,11 +436,14 @@ fn gallery_items(p: &PostData) -> Option<Vec<MediaItem>> {
         }
         let src = m.s.as_ref()?;
         if let Some(mp4) = &src.mp4 {
-            out.push(MediaItem {
-                url: decode_url(mp4),
-                kind: MediaKind::Video,
-                poster: src.u.as_ref().map(|u| decode_url(u)),
-            });
+            let mp4 = decode_url(mp4);
+            if url_is_playable_mp4(&mp4) {
+                out.push(MediaItem {
+                    url: mp4,
+                    kind: MediaKind::Video,
+                    poster: None,
+                });
+            }
             continue;
         }
         let u = src.u.as_ref().or(src.gif.as_ref())?;
@@ -423,11 +463,14 @@ fn gallery_items(p: &PostData) -> Option<Vec<MediaItem>> {
     }
 }
 
-fn media_from_url(url: &str, poster: Option<String>) -> Option<MediaItem> {
+fn media_from_url(url: &str) -> Option<MediaItem> {
     let url = decode_url(url);
+    if url_looks_deleted(&url) {
+        return None;
+    }
     let lower = url.to_ascii_lowercase();
 
-    // Imgur gifv/gif → mp4 when possible
+    // Imgur gifv/gif → progressive mp4 (easy to play muted/loop)
     if lower.contains("imgur.com/") {
         if let Some(base) = url
             .strip_suffix(".gifv")
@@ -435,16 +478,20 @@ fn media_from_url(url: &str, poster: Option<String>) -> Option<MediaItem> {
             .or_else(|| url.strip_suffix(".gif"))
             .or_else(|| url.strip_suffix(".GIF"))
         {
-            return Some(MediaItem {
-                url: format!("{base}.mp4"),
-                kind: MediaKind::Video,
-                poster,
-            });
+            let mp4 = format!("{base}.mp4");
+            if url_is_playable_mp4(&mp4) {
+                return Some(MediaItem {
+                    url: mp4,
+                    kind: MediaKind::Video,
+                    poster: None,
+                });
+            }
+            return None;
         }
     }
 
+    // Never treat bare v.redd.it as an image; only playable via reddit_video fallback.
     if lower.contains("v.redd.it") {
-        // bare v.redd.it without media.reddit_video — skip
         return None;
     }
 
@@ -1093,7 +1140,7 @@ mod tests {
 
     #[test]
     fn imgur_gifv_to_mp4() {
-        let item = media_from_url("https://i.imgur.com/ZenTaxR.gifv", None).unwrap();
+        let item = media_from_url("https://i.imgur.com/ZenTaxR.gifv").unwrap();
         assert_eq!(item.kind, MediaKind::Video);
         assert_eq!(item.url, "https://i.imgur.com/ZenTaxR.mp4");
     }
@@ -1122,4 +1169,58 @@ mod tests {
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].primary_url(), "https://i.redd.it/ok.jpg");
     }
+
+    #[test]
+    fn skips_not_robot_indexable() {
+        let json = r#"{
+          "data": [
+            {
+              "title": "Removed but CDN has file",
+              "url": "https://i.redd.it/x.jpg",
+              "permalink": "/r/pics/comments/1/",
+              "author": "someone",
+              "removed_by_category": "moderator",
+              "is_robot_indexable": false,
+              "post_hint": "image"
+            },
+            {
+              "title": "Live",
+              "url": "https://i.redd.it/ok.jpg",
+              "permalink": "/r/pics/comments/2/",
+              "author": "someone",
+              "is_robot_indexable": true,
+              "post_hint": "image"
+            }
+          ]
+        }"#;
+        let items = extract_images(json, "pics").unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].primary_url(), "https://i.redd.it/ok.jpg");
+    }
+
+    #[test]
+    fn skips_video_without_playable_mp4() {
+        let json = r#"{
+          "data": [
+            {
+              "title": "YT",
+              "url": "https://youtube.com/watch?v=abc",
+              "permalink": "/r/pics/comments/1/",
+              "is_video": false,
+              "post_hint": "rich:video",
+              "is_robot_indexable": true
+            },
+            {
+              "title": "v.redd.it no media object",
+              "url": "https://v.redd.it/abc",
+              "permalink": "/r/pics/comments/2/",
+              "is_video": true,
+              "is_robot_indexable": true
+            }
+          ]
+        }"#;
+        let err = extract_images(json, "pics").unwrap_err();
+        assert!(matches!(err, RedditError::NoImages));
+    }
+
 }
