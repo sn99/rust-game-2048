@@ -200,42 +200,56 @@ pub fn App() -> impl IntoView {
                 on_new_game=new_game
             />
             <DifficultyBar target=win_tile on_select=on_select_goal />
-            <SubredditBar
-                subreddit=subreddit
-                status=load_status.into()
-                loading=loading.into()
-                on_load=on_load_image
-                has_image=has_image
-            />
-            <ImagePanel
-                image_url=image_url
-                image_title=image_title
-                max_tile=max_tile
-                win_tile=win_tile
-                reveal_pct=reveal_pct
-                on_open_full=on_open_full
-                on_clear=on_clear_image
-            />
-            <div
-                class="board-wrap"
-                on:touchstart=on_touch_start
-                on:touchend=on_touch_end
-                on:touchmove=on_touch_move
-            >
-                <BoardView tiles=tiles />
-                <Overlay
-                    status=status
-                    win_tile=win_tile
-                    on_keep_going=keep_going
-                    on_try_again=new_game
-                />
+
+            <div class="play-layout">
+                // Game column (first in DOM = top on mobile)
+                <section class="play-game">
+                    <div
+                        class="board-wrap"
+                        on:touchstart=on_touch_start
+                        on:touchend=on_touch_end
+                        on:touchmove=on_touch_move
+                    >
+                        <BoardView tiles=tiles />
+                        <Overlay
+                            status=status
+                            win_tile=win_tile
+                            on_keep_going=keep_going
+                            on_try_again=new_game
+                        />
+                    </div>
+                    <p class="how-to panel panel-quiet how-to-desktop-hide">
+                        <strong>"How to play: "</strong>
+                        "Arrow keys or swipe. Matching tiles merge. Pick a goal to set when you win and when the photo clears."
+                    </p>
+                </section>
+
+                // Image + subreddit (side panel on desktop)
+                <aside class="play-media">
+                    <SubredditBar
+                        subreddit=subreddit
+                        status=load_status.into()
+                        loading=loading.into()
+                        on_load=on_load_image
+                        has_image=has_image
+                    />
+                    <ImagePanel
+                        image_url=image_url
+                        image_title=image_title
+                        max_tile=max_tile
+                        win_tile=win_tile
+                        reveal_pct=reveal_pct
+                        on_open_full=on_open_full
+                        on_clear=on_clear_image
+                    />
+                    <p class="how-to panel panel-quiet how-to-mobile-hide">
+                        <strong>"How to play: "</strong>
+                        "Arrow keys or swipe to move. Matching tiles merge. "
+                        "Easier goals clear the photo sooner. Images stay fully framed (no crop)."
+                    </p>
+                </aside>
             </div>
-            <p class="how-to panel panel-quiet">
-                <strong>"How to play: "</strong>
-                "Arrow keys or swipe to move. Matching tiles merge. "
-                "Pick a goal — easier goals clear the photo sooner. "
-                "Load a subreddit image to watch it unblur (full frame, no crop)."
-            </p>
+
             <p class="credit">
                 "Built with Rust + Leptos · Inspired by "
                 <a href="https://play2048.co/" target="_blank" rel="noopener noreferrer">
