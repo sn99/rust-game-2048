@@ -1103,3 +1103,57 @@ video.image-frame-img {
 .diff-btn {
   min-width: 48px;
 }
+
+/* Lock board while media loads */
+.board-wrap-locked {
+  pointer-events: none;
+}
+
+.board-loading {
+  position: absolute;
+  inset: 0;
+  z-index: 20;
+  border-radius: 12px;
+  background: rgba(40, 32, 24, 0.55);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  backdrop-filter: blur(2px);
+}
+
+.board-loading-card {
+  text-align: center;
+  color: #fff;
+  padding: 16px 20px;
+  border-radius: 12px;
+  background: rgba(30, 24, 18, 0.75);
+  max-width: 80%;
+}
+
+.board-loading-card p {
+  margin: 8px 0 0;
+  font-weight: 700;
+  font-size: 15px;
+}
+
+.board-loading-sub {
+  font-size: 12px !important;
+  font-weight: 600 !important;
+  opacity: 0.8;
+}
+
+.board-loading-spinner {
+  width: 28px;
+  height: 28px;
+  margin: 0 auto;
+  border: 3px solid rgba(255, 255, 255, 0.25);
+  border-top-color: #fff;
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}

@@ -269,30 +269,56 @@ fn post_is_unavailable(p: &PostData) -> bool {
     if p.removed_by_category.is_some() {
         return true;
     }
-    match p.title.as_deref().map(str::trim) {
-        Some("[deleted]") | Some("[removed]") => return true,
-        _ => {}
+    // Common tombstone titles from deleted/removed posts.
+    if let Some(title) = p.title.as_deref().map(str::trim) {
+        let tl = title.to_ascii_lowercase();
+        if matches!(
+            tl.as_str(),
+            "[deleted]" | "[removed]" | "deleted" | "removed" | "[removed by reddit]"
+        ) {
+            return true;
+        }
     }
-    // Fully deleted accounts with no usable hosted media left.
-    if p.author.as_deref() == Some("[deleted]") {
-        let has_video = p
-            .media
-            .as_ref()
-            .and_then(|m| m.reddit_video.as_ref())
-            .or_else(|| p.secure_media.as_ref().and_then(|m| m.reddit_video.as_ref()))
-            .and_then(|v| v.fallback_url.as_ref())
-            .is_some();
-        let has_gallery = p.gallery_data.is_some();
-        let has_i_reddit = p
-            .url
-            .as_ref()
-            .map(|u| u.contains("i.redd.it") || u.contains("preview.redd.it"))
-            .unwrap_or(false);
-        if !has_video && !has_gallery && !has_i_reddit {
+    if let Some(author) = p.author.as_deref() {
+        if author.eq_ignore_ascii_case("[deleted]") || author.eq_ignore_ascii_case("[removed]") {
+            // Keep only if hosted media metadata still looks intact; otherwise skip.
+            let has_video = p
+                .media
+                .as_ref()
+                .and_then(|m| m.reddit_video.as_ref())
+                .or_else(|| p.secure_media.as_ref().and_then(|m| m.reddit_video.as_ref()))
+                .and_then(|v| v.fallback_url.as_ref())
+                .is_some();
+            let has_gallery = p
+                .gallery_data
+                .as_ref()
+                .and_then(|g| g.items.as_ref())
+                .map(|i| !i.is_empty())
+                .unwrap_or(false);
+            let url = p.url.as_deref().unwrap_or("");
+            let has_direct = is_image_url(url) || url.contains("v.redd.it");
+            if !has_video && !has_gallery && !has_direct {
+                return true;
+            }
+        }
+    }
+    // Dead link patterns Reddit leaves behind.
+    if let Some(url) = p.url.as_deref() {
+        if url_looks_deleted(url) {
             return true;
         }
     }
     false
+}
+
+fn url_looks_deleted(url: &str) -> bool {
+    let u = url.to_ascii_lowercase();
+    u.contains("redditstatic.com")
+        || u.contains("default_avatar")
+        || u.contains("/removed")
+        || u.contains("emoji.")
+        || u.ends_with("/null")
+        || u.contains("style_emote")
 }
 
 fn collect_post_media(p: &PostData) -> Vec<MediaItem> {
@@ -625,45 +651,85 @@ pub async fn load_random_image(
     avoid_urls: &[String],
 ) -> Result<(RedditMedia, &'static str), RedditError> {
     let sub = normalize_subreddit(raw_sub).ok_or(RedditError::InvalidSubreddit)?;
-    // Walk windows until one has unused, live media.
-    // fetch_images_with_fallback already excludes session-seen posts.
-    let (images, window) = fetch_images_with_fallback(&sub, avoid_urls).await?;
-    if images.is_empty() {
-        return Err(RedditError::NoImages);
-    }
+    load_random_image_for_sub(&sub, avoid_urls).await
+}
 
-    // Random order among unused candidates; skip deleted hosts.
-    let mut order: Vec<usize> = (0..images.len()).collect();
-    for i in (1..order.len()).rev() {
-        let j = fastrand::usize(..=i);
-        order.swap(i, j);
-    }
-
-    let mut attempts = 0usize;
-    for idx in order {
-        if attempts >= 20 {
-            break;
-        }
-        attempts += 1;
-        let candidate = images[idx].clone();
-        // Double-check session uniqueness (all slide URLs).
-        if media_seen_in_session(&candidate, avoid_urls) {
-            continue;
-        }
-        if let Some(live) = filter_live_media(candidate).await {
-            if media_seen_in_session(&live, avoid_urls) {
+/// Try each time window; within a window try many random candidates with live URL checks.
+pub async fn load_random_image_for_sub(
+    sub: &str,
+    avoid_urls: &[String],
+) -> Result<(RedditMedia, &'static str), RedditError> {
+    #[cfg(target_arch = "wasm32")]
+    {
+        let mut last_err = RedditError::NoImages;
+        for (url, label) in listing_endpoints(sub) {
+            let text = match fetch_text(&url).await {
+                Ok(t) if t.trim_start().starts_with('{') => t,
+                Ok(_) => {
+                    last_err = RedditError::Parse("non-JSON body".into());
+                    continue;
+                }
+                Err(e) => {
+                    last_err = e;
+                    continue;
+                }
+            };
+            let imgs = match extract_images(&text, sub) {
+                Ok(v) => v,
+                Err(e) => {
+                    last_err = e;
+                    continue;
+                }
+            };
+            let mut fresh: Vec<RedditMedia> = imgs
+                .into_iter()
+                .filter(|m| !media_seen_in_session(m, avoid_urls))
+                .collect();
+            if fresh.is_empty() {
+                last_err = RedditError::NoImages;
                 continue;
             }
-            return Ok((live, window));
+            // Shuffle
+            for i in (1..fresh.len()).rev() {
+                let j = fastrand::usize(..=i);
+                fresh.swap(i, j);
+            }
+            let mut attempts = 0usize;
+            for candidate in fresh {
+                if attempts >= 18 {
+                    break;
+                }
+                attempts += 1;
+                if media_seen_in_session(&candidate, avoid_urls) {
+                    continue;
+                }
+                if let Some(live) = filter_live_media(candidate).await {
+                    if !media_seen_in_session(&live, avoid_urls) && !live.items.is_empty() {
+                        return Ok((live, label));
+                    }
+                }
+            }
+            last_err = RedditError::NoImages;
         }
+        Err(last_err)
     }
-    Err(RedditError::NoImages)
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let _ = (sub, avoid_urls);
+        Err(RedditError::Network("browser only".into()))
+    }
 }
 
 /// Keep only media that still loads (filters Reddit-deleted files).
 pub async fn filter_live_media(media: RedditMedia) -> Option<RedditMedia> {
+    if media.items.iter().any(|i| url_looks_deleted(&i.url)) {
+        // Any tombstone URL → reject whole post (partial galleries are rebuilt below).
+    }
     let mut live = Vec::with_capacity(media.items.len());
     for item in media.items {
+        if url_looks_deleted(&item.url) {
+            continue;
+        }
         if media_item_is_available(&item).await {
             live.push(item);
         }
@@ -682,9 +748,35 @@ pub async fn filter_live_media(media: RedditMedia) -> Option<RedditMedia> {
 
 #[cfg(target_arch = "wasm32")]
 async fn media_item_is_available(item: &MediaItem) -> bool {
+    // Prefer HTTP status when CORS allows; always fall back to element load probe.
+    if let Some(ok) = http_url_ok(&item.url).await {
+        if !ok {
+            return false;
+        }
+    }
     match item.kind {
         MediaKind::Image => probe_image(&item.url).await,
         MediaKind::Video => probe_video(&item.url).await,
+    }
+}
+
+/// Returns Some(true/false) if we got a readable HTTP status; None if CORS blocked.
+#[cfg(target_arch = "wasm32")]
+async fn http_url_ok(url: &str) -> Option<bool> {
+    match gloo_net::http::Request::get(url).send().await {
+        Ok(resp) => {
+            let status = resp.status();
+            // 2xx/3xx ok; 404/410 gone; 403 often deleted/forbidden media
+            if status == 404 || status == 410 || status == 451 {
+                return Some(false);
+            }
+            if (200..400).contains(&status) {
+                return Some(true);
+            }
+            // Other statuses (403 etc.) — still try element probe (CDN quirks)
+            None
+        }
+        Err(_) => None,
     }
 }
 
@@ -709,7 +801,10 @@ async fn probe_image(url: &str) -> bool {
         let img_ok = img.clone();
         let resolve_ok = resolve.clone();
         let onload = Closure::once(move || {
-            let ok = img_ok.natural_width() > 1 && img_ok.natural_height() > 1;
+            let w = img_ok.natural_width();
+            let h = img_ok.natural_height();
+            // Reject broken/tiny placeholders; real posts are much larger.
+            let ok = w >= 64 && h >= 64;
             let _ = resolve_ok.call1(&JsValue::NULL, &JsValue::from_bool(ok));
         });
         let resolve_err = resolve.clone();
@@ -765,7 +860,11 @@ async fn probe_video(url: &str) -> bool {
             }) as Rc<dyn Fn(bool)>
         };
         let f1 = finish.clone();
-        let onok = Closure::wrap(Box::new(move || f1(true)) as Box<dyn FnMut()>);
+        let vid_ok = vid.clone();
+        let onok = Closure::wrap(Box::new(move || {
+            let ok = vid_ok.video_width() >= 32 && vid_ok.video_height() >= 32;
+            f1(ok);
+        }) as Box<dyn FnMut()>);
         let f2 = finish.clone();
         let onerror = Closure::wrap(Box::new(move || f2(false)) as Box<dyn FnMut()>);
         let _ = vid.add_event_listener_with_callback("loadedmetadata", onok.as_ref().unchecked_ref());

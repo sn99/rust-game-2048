@@ -8,7 +8,7 @@ use crate::input::{
     direction_from_swipe, touch_end_delta, touch_start_coords, use_keyboard, TouchTracker,
 };
 use crate::progress::reveal_progress;
-use crate::reddit::{load_random_image, warm_media_cache, RedditMedia};
+use crate::reddit::{filter_live_media, load_random_image, media_seen_in_session, warm_media_cache, RedditMedia};
 use crate::storage::{
     load_best, load_goal, load_session_seen_urls, load_subreddit, push_recent_media_urls, save_best,
     save_goal, save_subreddit,
@@ -89,7 +89,10 @@ pub fn App() -> impl IntoView {
     };
 
     let apply_move = Callback::new(move |dir: Direction| {
-        if animating.get_untracked() || lightbox_open.get_untracked() {
+        if animating.get_untracked()
+            || lightbox_open.get_untracked()
+            || loading.get_untracked()
+        {
             return;
         }
 
@@ -220,19 +223,31 @@ pub fn App() -> impl IntoView {
             return;
         }
 
-        // Instant path: use preloaded +1
-        if let Some((img, window)) = preloaded.get_untracked() {
-            preloaded.set(None);
-            apply_loaded_media(img, window);
-            start_preload();
-            return;
-        }
-
         let raw = subreddit.get_untracked();
         loading.set(true);
-        load_status.set("Searching top week → day → month → year → all-time…".into());
+        load_status.set("Loading media (skipping deleted)…".into());
+
         spawn_local(async move {
-            let avoid = load_session_seen_urls();
+            let mut avoid = load_session_seen_urls();
+
+            // Prefer preloaded, but re-verify it is still alive and unused.
+            if let Some((img, window)) = preloaded.get_untracked() {
+                preloaded.set(None);
+                if !media_seen_in_session(&img, &avoid) {
+                    if let Some(live) = filter_live_media(img).await {
+                        if !media_seen_in_session(&live, &avoid) {
+                            apply_loaded_media(live, window);
+                            loading.set(false);
+                            start_preload();
+                            return;
+                        }
+                    }
+                }
+                // Preload was stale/deleted — fall through to full search.
+            }
+
+            load_status.set("Searching top week → day → month → year → all-time…".into());
+            avoid = load_session_seen_urls();
             match load_random_image(&raw, &avoid).await {
                 Ok((img, window)) => {
                     apply_loaded_media(img, window);
@@ -262,6 +277,9 @@ pub fn App() -> impl IntoView {
     use_keyboard(apply_move);
 
     let on_touch_start = move |ev: TouchEvent| {
+        if loading.get_untracked() {
+            return;
+        }
         if let Some((x, y)) = touch_start_coords(&ev) {
             touch.set(TouchTracker {
                 start_x: x,
@@ -271,6 +289,9 @@ pub fn App() -> impl IntoView {
     };
 
     let on_touch_end = move |ev: TouchEvent| {
+        if loading.get_untracked() {
+            return;
+        }
         let start = touch.get();
         if let Some((dx, dy)) = touch_end_delta(&ev, start) {
             if let Some(dir) = direction_from_swipe(dx, dy) {
@@ -306,7 +327,13 @@ pub fn App() -> impl IntoView {
             <div class="play-layout">
                 <section class="play-game">
                     <div
-                        class="board-wrap"
+                        class=move || {
+                            if loading.get() {
+                                "board-wrap board-wrap-locked"
+                            } else {
+                                "board-wrap"
+                            }
+                        }
                         on:touchstart=on_touch_start
                         on:touchend=on_touch_end
                         on:touchmove=on_touch_move
@@ -318,6 +345,15 @@ pub fn App() -> impl IntoView {
                             on_keep_going=keep_going
                             on_try_again=new_game
                         />
+                        <Show when=move || loading.get()>
+                            <div class="board-loading" role="status" aria-live="polite">
+                                <div class="board-loading-card">
+                                    <div class="board-loading-spinner"></div>
+                                    <p>"Loading media…"</p>
+                                    <p class="board-loading-sub">"Play unlocks when ready"</p>
+                                </div>
+                            </div>
+                        </Show>
                     </div>
                 </section>
 
