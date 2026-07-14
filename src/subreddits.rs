@@ -219,46 +219,61 @@ pub fn curated_blurb(name: &str) -> Option<&'static str> {
     None
 }
 
-/// Session-seen names so SFW/NSFW cycles through the list before repeats.
+/// Shuffled draw-deck so each sub appears once per cycle (then reshuffled).
 #[cfg(target_arch = "wasm32")]
-fn session_seen_key(pool: SubredditPool) -> &'static str {
+fn session_deck_key(pool: SubredditPool) -> &'static str {
     match pool {
-        SubredditPool::Sfw => "rust-game-2048-seen-sfw",
-        SubredditPool::NsfwOnly => "rust-game-2048-seen-nsfw",
+        SubredditPool::Sfw => "rust-game-2048-deck-sfw-v2",
+        SubredditPool::NsfwOnly => "rust-game-2048-deck-nsfw-v2",
     }
 }
 
 #[cfg(target_arch = "wasm32")]
-fn load_session_seen(pool: SubredditPool) -> Vec<String> {
+fn load_session_deck(pool: SubredditPool) -> Vec<String> {
     web_sys::window()
         .and_then(|w| w.session_storage().ok().flatten())
-        .and_then(|s| s.get_item(session_seen_key(pool)).ok().flatten())
+        .and_then(|s| s.get_item(session_deck_key(pool)).ok().flatten())
         .and_then(|raw| serde_json::from_str(&raw).ok())
         .unwrap_or_default()
 }
 
 #[cfg(target_arch = "wasm32")]
-fn save_session_seen(pool: SubredditPool, seen: &[String]) {
+fn save_session_deck(pool: SubredditPool, deck: &[String]) {
     if let Some(storage) = web_sys::window().and_then(|w| w.session_storage().ok().flatten()) {
-        if let Ok(raw) = serde_json::to_string(seen) {
-            let _ = storage.set_item(session_seen_key(pool), &raw);
+        if let Ok(raw) = serde_json::to_string(deck) {
+            let _ = storage.set_item(session_deck_key(pool), &raw);
         }
     }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn load_session_seen(_pool: SubredditPool) -> Vec<String> {
+fn load_session_deck(_pool: SubredditPool) -> Vec<String> {
     Vec::new()
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn save_session_seen(_pool: SubredditPool, _seen: &[String]) {}
+fn save_session_deck(_pool: SubredditPool, _deck: &[String]) {}
 
-/// Uniform random entry from the pool.
+fn fisher_yates_shuffle(names: &mut [String]) {
+    for i in (1..names.len()).rev() {
+        let j = fastrand::usize(..=i);
+        names.swap(i, j);
+    }
+}
+
+fn entry_by_name(list: &[SubredditEntry], name: &str) -> Option<SubredditEntry> {
+    list.iter()
+        .copied()
+        .find(|e| e.name.eq_ignore_ascii_case(name))
+}
+
+/// Draw from a shuffled deck of the static curated pool.
 ///
-/// - Equal chance for every sub in the pool (not biased retries).
-/// - Avoids the current sub when possible.
-/// - Within a tab session, prefers subs not yet rolled until the pool is exhausted, then reshuffles.
+/// Yes — the **catalog is static** (curated image-friendly subs), but draws are:
+/// - re-seeded with real browser entropy (`fastrand` + `js` feature)
+/// - **without replacement** until every sub in the pool has been used once
+/// - then the deck is reshuffled (new random order)
+/// - never returns the current sub when another option exists
 pub fn pick_random_entry(pool: SubredditPool, avoid: Option<&str>) -> SubredditEntry {
     let list = pool_entries(pool);
     if list.is_empty() {
@@ -272,56 +287,43 @@ pub fn pick_random_entry(pool: SubredditPool, avoid: Option<&str>) -> SubredditE
         .map(|s| s.trim().to_ascii_lowercase())
         .filter(|s| !s.is_empty());
 
-    let mut seen = load_session_seen(pool);
-    let seen_set: std::collections::HashSet<String> =
-        seen.iter().map(|s| s.to_ascii_lowercase()).collect();
+    let mut deck = load_session_deck(pool);
 
-    // Candidates: not current, not already rolled this session.
-    let mut fresh: Vec<SubredditEntry> = list
-        .iter()
-        .copied()
-        .filter(|e| {
-            let n = e.name.to_ascii_lowercase();
-            if avoid_l.as_ref().is_some_and(|a| a == &n) {
-                return false;
-            }
-            !seen_set.contains(&n)
-        })
-        .collect();
+    // Drop names that are no longer in the catalog (after list updates).
+    deck.retain(|n| entry_by_name(list, n).is_some());
 
-    // Session exhausted (or only avoid left) — full reshuffle of the pool.
-    if fresh.is_empty() {
-        seen.clear();
-        fresh = list
-            .iter()
-            .copied()
-            .filter(|e| {
-                avoid_l
-                    .as_ref()
-                    .map(|a| a != &e.name.to_ascii_lowercase())
-                    .unwrap_or(true)
-            })
-            .collect();
+    // Rebuild + shuffle when empty or corrupt.
+    if deck.is_empty() {
+        deck = list.iter().map(|e| e.name.to_string()).collect();
+        fisher_yates_shuffle(&mut deck);
     }
 
-    // If avoid was the only entry, fall back to entire list.
-    if fresh.is_empty() {
-        fresh = list.to_vec();
-    }
-
-    // True uniform pick among remaining candidates.
-    let choice = fresh[fastrand::usize(..fresh.len())];
-    let key = choice.name.to_ascii_lowercase();
-    if !seen.iter().any(|s| s.eq_ignore_ascii_case(&key)) {
-        seen.push(choice.name.to_string());
-        // Cap in case lists grow; keep recent half on overflow.
-        if seen.len() > list.len().saturating_mul(2).max(64) {
-            let drop_n = seen.len() / 2;
-            seen.drain(0..drop_n);
+    // Draw next name that isn't the current sub (if possible).
+    let mut choice_name: Option<String> = None;
+    let mut i = 0;
+    while i < deck.len() {
+        let candidate = deck[i].clone();
+        let is_avoid = avoid_l
+            .as_ref()
+            .is_some_and(|a| a == &candidate.to_ascii_lowercase());
+        if !is_avoid {
+            choice_name = Some(candidate);
+            deck.remove(i);
+            break;
         }
-        save_session_seen(pool, &seen);
+        i += 1;
     }
-    choice
+
+    // Only the avoided name left — take it, then reshuffle rest next time.
+    if choice_name.is_none() {
+        choice_name = deck.pop();
+    }
+
+    // Deck depleted after this draw — next call reshuffles full pool.
+    save_session_deck(pool, &deck);
+
+    let name = choice_name.unwrap_or_else(|| list[fastrand::usize(..list.len())].name.to_string());
+    entry_by_name(list, &name).unwrap_or(list[0])
 }
 
 /// Back-compat name picker.
