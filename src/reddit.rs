@@ -216,15 +216,6 @@ fn now_secs() -> u64 {
     (js_sys::Date::now() / 1000.0) as u64
 }
 
-#[cfg(not(target_arch = "wasm32"))]
-#[cfg(target_arch = "wasm32")]
-fn now_secs() -> u64 {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
-}
 
 /// Pullpush windows: top by score within time range (via `since` unix ts).
 /// Order: week → day → month → all-time score → recent.
