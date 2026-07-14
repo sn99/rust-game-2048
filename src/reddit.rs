@@ -28,7 +28,7 @@ impl std::fmt::Display for RedditError {
             RedditError::InvalidSubreddit => write!(f, "Enter a valid subreddit name"),
             RedditError::Network(s) => write!(f, "Could not load images ({s})"),
             RedditError::NoImages => {
-                write!(f, "No SFW image posts found — try another subreddit")
+                write!(f, "No image posts found — try another subreddit (videos are skipped)")
             }
             RedditError::Parse(s) => write!(f, "Unexpected API response ({s})"),
         }
@@ -82,6 +82,7 @@ struct PostData {
     title: Option<String>,
     url: Option<String>,
     permalink: Option<String>,
+    #[allow(dead_code)]
     over_18: Option<bool>,
     post_hint: Option<String>,
     is_video: Option<bool>,
@@ -120,9 +121,7 @@ pub fn extract_images(json: &str, subreddit: &str) -> Result<Vec<RedditImage>, R
 fn posts_to_images(posts: Vec<PostData>, subreddit: &str) -> Result<Vec<RedditImage>, RedditError> {
     let mut out = Vec::new();
     for p in posts {
-        if p.over_18.unwrap_or(false) {
-            continue;
-        }
+        // NSFW/over_18 allowed (needed for subs like FiftyFifty).
         if p.is_video.unwrap_or(false) || p.is_gallery.unwrap_or(false) {
             continue;
         }
@@ -296,8 +295,10 @@ mod tests {
           }
         }"#;
         let imgs = extract_images(json, "cats").unwrap();
-        assert_eq!(imgs.len(), 1);
+        // NSFW still images are allowed; video would still be skipped.
+        assert_eq!(imgs.len(), 2);
         assert_eq!(imgs[0].url, "https://i.redd.it/abc123.jpg");
+        assert_eq!(imgs[1].url, "https://i.redd.it/nsfw.jpg");
     }
 
     #[test]
