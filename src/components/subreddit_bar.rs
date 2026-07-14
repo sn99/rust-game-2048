@@ -6,15 +6,14 @@ pub fn SubredditBar(
     status: Signal<String>,
     loading: Signal<bool>,
     on_load: Callback<()>,
-    on_clear: Callback<()>,
     has_image: Signal<bool>,
-    reveal_pct: Signal<u32>,
 ) -> impl IntoView {
     view! {
-        <div class="subreddit-bar">
-            <label class="subreddit-label" for="subreddit-input">
-                "Background subreddit"
-            </label>
+        <section class="panel subreddit-bar">
+            <h2 class="panel-title">"Background"</h2>
+            <p class="panel-sub">
+                "Load a top image from a subreddit. It stays fully framed and unblurs as you approach your goal."
+            </p>
             <div class="subreddit-row">
                 <span class="subreddit-prefix">"r/"</span>
                 <input
@@ -43,27 +42,20 @@ pub fn SubredditBar(
                     prop:disabled=move || loading.get()
                     on:click=move |_| on_load.run(())
                 >
-                    {move || if loading.get() { "Loading…" } else { "Load image" }}
+                    {move || {
+                        if loading.get() {
+                            "Loading…"
+                        } else if has_image.get() {
+                            "New image"
+                        } else {
+                            "Load image"
+                        }
+                    }}
                 </button>
-                <Show when=move || has_image.get()>
-                    <button
-                        class="btn btn-clear"
-                        type="button"
-                        on:click=move |_| on_clear.run(())
-                    >
-                        "Clear"
-                    </button>
-                </Show>
             </div>
             <p class="subreddit-status">
                 {move || status.get()}
             </p>
-            <Show when=move || has_image.get()>
-                <p class="subreddit-hint">
-                    "Image unblurs toward your goal as tiles climb — "
-                    {move || format!("{}% revealed", reveal_pct.get())}
-                </p>
-            </Show>
-        </div>
+        </section>
     }
 }

@@ -2,13 +2,13 @@ use crate::difficulty::{self, TARGETS};
 use leptos::prelude::*;
 
 #[component]
-pub fn DifficultyBar(
-    target: Signal<u32>,
-    on_select: Callback<u32>,
-) -> impl IntoView {
+pub fn DifficultyBar(target: Signal<u32>, on_select: Callback<u32>) -> impl IntoView {
     view! {
-        <div class="difficulty-bar" role="group" aria-label="Difficulty — win target">
-            <div class="difficulty-label">"Goal"</div>
+        <section class="panel difficulty-bar" role="group" aria-label="Difficulty — win target">
+            <h2 class="panel-title">"Goal"</h2>
+            <p class="panel-sub">
+                "Easier goals unblur the photo sooner. Changing goal starts a new game."
+            </p>
             <div class="difficulty-buttons">
                 {TARGETS
                     .iter()
@@ -34,6 +34,6 @@ pub fn DifficultyBar(
                     })
                     .collect_view()}
             </div>
-        </div>
+        </section>
     }
 }

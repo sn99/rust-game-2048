@@ -8,9 +8,12 @@ pub fn Header(
     on_new_game: Callback<()>,
 ) -> impl IntoView {
     view! {
-        <div class="header">
+        <header class="header panel header-panel">
             <div class="header-top">
-                <h1 class="title">{move || win_tile.get().to_string()}</h1>
+                <div class="brand">
+                    <h1 class="title">{move || win_tile.get().to_string()}</h1>
+                    <p class="tagline">"merge · reach your goal"</p>
+                </div>
                 <div class="scores">
                     <div class="score-box">
                         <div class="score-label">"SCORE"</div>
@@ -24,14 +27,14 @@ pub fn Header(
             </div>
             <div class="header-bottom">
                 <p class="subtitle">
-                    "Join the tiles, get to "
+                    "Join matching tiles until you create a "
                     <strong>{move || win_tile.get().to_string()}</strong>
-                    "!"
+                    " tile."
                 </p>
                 <button class="btn btn-new" type="button" on:click=move |_| on_new_game.run(())>
                     "New Game"
                 </button>
             </div>
-        </div>
+        </header>
     }
 }

@@ -1,5 +1,6 @@
 use crate::components::{
-    BoardView, DifficultyBar, Header, Overlay, RevealBackground, SubredditBar,
+    BoardView, DifficultyBar, Header, ImagePanel, Lightbox, Overlay, RevealBackground,
+    SubredditBar,
 };
 use crate::difficulty::clamp_target;
 use crate::game::{Board, Direction};
@@ -17,7 +18,6 @@ use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::spawn_local;
 use web_sys::TouchEvent;
 
-/// Match classic 2048 slide duration before spawning the next tile.
 const SLIDE_MS: i32 = 100;
 
 #[component]
@@ -37,13 +37,16 @@ pub fn App() -> impl IntoView {
     let image = RwSignal::new(None::<RedditImage>);
     let load_status = RwSignal::new(String::new());
     let loading = RwSignal::new(false);
+    let lightbox_open = RwSignal::new(false);
+    let lightbox_sharp = RwSignal::new(false);
 
     let score = Signal::derive(move || board.get().score());
     let status = Signal::derive(move || board.get().status());
     let tiles = Signal::derive(move || board.get().tiles().to_vec());
     let max_tile = Signal::derive(move || board.get().max_tile());
     let win_tile = Signal::derive(move || goal.get());
-    let image_url = Signal::derive(move || image.get().map(|i| i.url));
+    let image_url = Signal::derive(move || image.get().map(|i| i.url.clone()));
+    let image_title = Signal::derive(move || image.get().map(|i| i.title.clone()).unwrap_or_default());
     let has_image = Signal::derive(move || image.get().is_some());
     let reveal_pct = Signal::derive(move || {
         (reveal_progress(max_tile.get(), goal.get()) * 100.0).round() as u32
@@ -64,7 +67,7 @@ pub fn App() -> impl IntoView {
     };
 
     let apply_move = Callback::new(move |dir: Direction| {
-        if animating.get_untracked() {
+        if animating.get_untracked() || lightbox_open.get_untracked() {
             return;
         }
 
@@ -133,6 +136,7 @@ pub fn App() -> impl IntoView {
                         format!("r/{} — {}", img.subreddit, title)
                     };
                     image.set(Some(img));
+                    lightbox_sharp.set(false);
                     load_status.set(msg);
                 }
                 Err(e) => {
@@ -145,7 +149,13 @@ pub fn App() -> impl IntoView {
 
     let on_clear_image = Callback::new(move |_: ()| {
         image.set(None);
+        lightbox_open.set(false);
         load_status.set(String::new());
+    });
+
+    let on_open_full = Callback::new(move |_: ()| {
+        lightbox_sharp.set(false);
+        lightbox_open.set(true);
     });
 
     use_keyboard(apply_move);
@@ -174,6 +184,14 @@ pub fn App() -> impl IntoView {
 
     view! {
         <RevealBackground image_url=image_url max_tile=max_tile win_tile=win_tile />
+        <Lightbox
+            open=lightbox_open
+            image_url=image_url
+            image_title=image_title
+            max_tile=max_tile
+            win_tile=win_tile
+            sharp=lightbox_sharp
+        />
         <main class="app">
             <Header
                 score=score
@@ -187,9 +205,16 @@ pub fn App() -> impl IntoView {
                 status=load_status.into()
                 loading=loading.into()
                 on_load=on_load_image
-                on_clear=on_clear_image
                 has_image=has_image
+            />
+            <ImagePanel
+                image_url=image_url
+                image_title=image_title
+                max_tile=max_tile
+                win_tile=win_tile
                 reveal_pct=reveal_pct
+                on_open_full=on_open_full
+                on_clear=on_clear_image
             />
             <div
                 class="board-wrap"
@@ -205,16 +230,11 @@ pub fn App() -> impl IntoView {
                     on_try_again=new_game
                 />
             </div>
-            <p class="how-to">
+            <p class="how-to panel panel-quiet">
                 <strong>"How to play: "</strong>
-                "Use your "
-                <strong>"arrow keys"</strong>
-                " or "
-                <strong>"swipe"</strong>
-                " to move the tiles. Pick a "
-                <strong>"goal"</strong>
-                " below the title (64 is easiest, 4096 is hardest). "
-                "Optional: load a subreddit image — it unblurs as you approach your goal."
+                "Arrow keys or swipe to move. Matching tiles merge. "
+                "Pick a goal — easier goals clear the photo sooner. "
+                "Load a subreddit image to watch it unblur (full frame, no crop)."
             </p>
             <p class="credit">
                 "Built with Rust + Leptos · Inspired by "
