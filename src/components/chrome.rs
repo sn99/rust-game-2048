@@ -21,6 +21,7 @@ pub fn Chrome(
     status: Signal<String>,
     loading: Signal<bool>,
     on_load: Callback<()>,
+    #[allow(unused_variables)]
     has_image: Signal<bool>,
 ) -> impl IntoView {
     let description = RwSignal::new(String::new());
@@ -163,17 +164,10 @@ pub fn Chrome(
                         class="btn btn-load"
                         type="button"
                         prop:disabled=move || loading.get()
+                        title="Load a top post from this subreddit (same board)"
                         on:click=move |_| load_named()
                     >
-                        {move || {
-                            if loading.get() {
-                                "…"
-                            } else if has_image.get() {
-                                "New"
-                            } else {
-                                "Load"
-                            }
-                        }}
+                        {move || if loading.get() { "…" } else { "Load" }}
                     </button>
                     <button
                         type="button"
@@ -196,6 +190,7 @@ pub fn Chrome(
                     <button
                         class="btn btn-new"
                         type="button"
+                        title="Reset the board (keeps best score and current image)"
                         on:click=move |_| on_new_game.run(())
                     >
                         "New Game"
