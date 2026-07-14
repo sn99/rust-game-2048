@@ -5,8 +5,8 @@ use leptos::prelude::*;
 pub fn Overlay(
     status: Signal<GameStatus>,
     win_tile: Signal<u32>,
-    on_keep_going: Callback<()>,
-    on_try_again: Callback<()>,
+    /// Same as chrome “Next”: new board + next post.
+    on_next_game: Callback<()>,
 ) -> impl IntoView {
     view! {
         <Show when=move || matches!(status.get(), GameStatus::Won | GameStatus::Over)>
@@ -30,21 +30,13 @@ pub fn Overlay(
                         }}
                     </p>
                     <div class="overlay-actions">
-                        <Show when=move || status.get() == GameStatus::Won>
-                            <button
-                                class="btn btn-keep"
-                                type="button"
-                                on:click=move |_| on_keep_going.run(())
-                            >
-                                "Keep going"
-                            </button>
-                        </Show>
                         <button
                             class="btn btn-retry"
                             type="button"
-                            on:click=move |_| on_try_again.run(())
+                            title="New board and next post"
+                            on:click=move |_| on_next_game.run(())
                         >
-                            "Try again"
+                            "Next game"
                         </button>
                     </div>
                 </div>

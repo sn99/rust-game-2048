@@ -3,7 +3,7 @@
 use crate::difficulty::{self, TARGETS};
 use crate::storage::{save_subreddit, save_subreddit_pool};
 use crate::subreddits::{
-    curated_blurb, fetch_subreddit_description, pick_random_entry, SubredditPool,
+    curated_blurb, fetch_subreddit_description, pick_random_subreddit_live, SubredditPool,
 };
 use leptos::prelude::*;
 use wasm_bindgen_futures::spawn_local;
@@ -65,21 +65,31 @@ pub fn Chrome(
         pool.set(p);
         save_subreddit_pool(p);
         let current = subreddit.get_untracked();
-        let entry = pick_random_entry(p, Some(current.as_str()));
-        subreddit.set(entry.name.to_string());
-        save_subreddit(entry.name);
-        description.set(entry.blurb.to_string());
         let gen = desc_gen.get_untracked() + 1;
         desc_gen.set(gen);
-        let name = entry.name.to_string();
+        description.set("Finding a community…".into());
         spawn_local(async move {
-            if let Some(live) = fetch_subreddit_description(&name).await {
-                if desc_gen.get_untracked() == gen {
-                    description.set(live);
+            match pick_random_subreddit_live(p, Some(current.as_str())).await {
+                Ok(entry) => {
+                    if desc_gen.get_untracked() != gen {
+                        return;
+                    }
+                    subreddit.set(entry.name.clone());
+                    save_subreddit(&entry.name);
+                    if entry.blurb.is_empty() {
+                        description.set(format!("r/{}", entry.name));
+                    } else {
+                        description.set(entry.blurb);
+                    }
+                    on_play.run(());
+                }
+                Err(e) => {
+                    if desc_gen.get_untracked() == gen {
+                        description.set(e.to_string());
+                    }
                 }
             }
         });
-        on_play.run(());
     };
 
     let action_label = move || {

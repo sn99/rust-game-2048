@@ -42,11 +42,12 @@ pub fn App() -> impl IntoView {
     let subreddit = RwSignal::new(load_subreddit());
     let subreddit_pool = RwSignal::new(load_subreddit_pool());
     let image = RwSignal::new(None::<RedditMedia>);
-    /// Preloaded next media for instant "New image".
-    let preloaded = RwSignal::new(None::<(RedditMedia, &'static str)>);
+    /// Queue of ready next posts (target depth 3) for instant Next / Next game.
+    let preload_queue = RwSignal::new(Vec::<(RedditMedia, &'static str)>::new());
     let preload_busy = RwSignal::new(false);
-    /// Bumped to cancel a pending delayed prefetch.
+    /// Bumped to cancel in-flight prefetch workers.
     let preload_gen = RwSignal::new(0u32);
+    const PRELOAD_TARGET: usize = 3;
     let slide_index = RwSignal::new(0usize);
     let load_status = RwSignal::new(String::new());
     let loading = RwSignal::new(false);
@@ -175,145 +176,159 @@ pub fn App() -> impl IntoView {
         }
     };
 
-    /// Background-fetch the *next* post while the user plays the current one.
-    /// Fully verifies media so Next can apply instantly.
-    let start_preload = move || {
-        if preloaded.get_untracked().is_some() || preload_busy.get_untracked() {
-            return;
-        }
-        // Never compete with a foreground load.
-        if loading.get_untracked() {
+    /// Keep up to PRELOAD_TARGET verified posts ready while the user plays.
+    let fill_preload_queue = move || {
+        if loading.get_untracked() || preload_busy.get_untracked() {
             return;
         }
         let raw = subreddit.get_untracked();
         if raw.trim().is_empty() {
             return;
         }
-        let gen = preload_gen.get_untracked().wrapping_add(1);
-        preload_gen.set(gen);
+        if preload_queue.with_untracked(|q| q.len()) >= PRELOAD_TARGET {
+            return;
+        }
+
+        let gen = preload_gen.get_untracked();
         preload_busy.set(true);
 
         spawn_local(async move {
-            if preload_gen.get_untracked() != gen {
+            // Fill until target or generation cancelled.
+            while preload_gen.get_untracked() == gen
+                && !loading.get_untracked()
+                && preload_queue.with_untracked(|q| q.len()) < PRELOAD_TARGET
+            {
+                let mut avoid = load_session_seen_urls();
+                if let Some(cur) = image.get_untracked() {
+                    for it in &cur.items {
+                        avoid.push(it.url.clone());
+                    }
+                }
+                preload_queue.with_untracked(|q| {
+                    for (p, _) in q {
+                        for it in &p.items {
+                            avoid.push(it.url.clone());
+                        }
+                    }
+                });
+
+                let result = load_random_image(&raw, &avoid).await;
+                if preload_gen.get_untracked() != gen {
+                    break;
+                }
+                match result {
+                    Ok((img, window)) => {
+                        if !post_is_still_public(&img.id).await {
+                            continue;
+                        }
+                        if preload_gen.get_untracked() != gen {
+                            break;
+                        }
+                        let Some(live) = filter_live_media(img).await else {
+                            continue;
+                        };
+                        if preload_gen.get_untracked() != gen {
+                            break;
+                        }
+                        if media_seen_in_session(&live, &load_session_seen_urls()) {
+                            continue;
+                        }
+                        // Dedup against queue by primary URL / id.
+                        let dup = preload_queue.with_untracked(|q| {
+                            q.iter().any(|(m, _)| m.id == live.id || m.primary_url() == live.primary_url())
+                        });
+                        if dup {
+                            continue;
+                        }
+                        warm_media_cache(&live);
+                        preload_queue.update(|q| {
+                            if q.len() < PRELOAD_TARGET {
+                                q.push((live, window));
+                            }
+                        });
+                    }
+                    Err(_) => {
+                        // Rate limit / empty — stop this fill wave.
+                        break;
+                    }
+                }
+            }
+            if preload_gen.get_untracked() == gen {
                 preload_busy.set(false);
-                return;
-            }
-
-            let mut avoid = load_session_seen_urls();
-            if let Some(cur) = image.get_untracked() {
-                for it in &cur.items {
-                    avoid.push(it.url.clone());
-                }
-            }
-            // Also avoid whatever is already staged (shouldn't exist, but be safe).
-            if let Some((p, _)) = preloaded.get_untracked() {
-                for it in &p.items {
-                    avoid.push(it.url.clone());
-                }
-            }
-
-            let result = load_random_image(&raw, &avoid).await;
-            if preload_gen.get_untracked() != gen {
+            } else {
                 preload_busy.set(false);
-                return;
             }
-
-            match result {
-                Ok((img, window)) => {
-                    // Verify + probe while the user is still playing so Next is instant.
-                    if preload_gen.get_untracked() != gen {
-                        preload_busy.set(false);
-                        return;
-                    }
-                    if !post_is_still_public(&img.id).await {
-                        preload_busy.set(false);
-                        return;
-                    }
-                    if preload_gen.get_untracked() != gen {
-                        preload_busy.set(false);
-                        return;
-                    }
-                    let Some(live) = filter_live_media(img).await else {
-                        preload_busy.set(false);
-                        return;
-                    };
-                    if preload_gen.get_untracked() != gen {
-                        preload_busy.set(false);
-                        return;
-                    }
-                    if media_seen_in_session(&live, &load_session_seen_urls()) {
-                        preload_busy.set(false);
-                        return;
-                    }
-                    warm_media_cache(&live);
-                    preloaded.set(Some((live, window)));
-                }
-                Err(_) => {
-                    // Silent (rate limits, no media). User can still Next with a full fetch.
-                }
-            }
-            preload_busy.set(false);
         });
     };
 
-    /// Load next media. `reset_board`: true for Play/Next; false for Keep going.
-    let load_media = move |reset_board: bool| {
+    /// Load next media. Always starts a fresh board run (Play / Next / Next game).
+    let load_media = move || {
         if loading.get_untracked() {
             return;
         }
 
         let raw = subreddit.get_untracked();
         let want_sub = normalize_subreddit(&raw).unwrap_or_else(|| raw.trim().to_string());
-
-        // Instant path: use ready prefetched post (already verified + warmed).
         let avoid = load_session_seen_urls();
-        if let Some((img, window)) = preloaded.get_untracked() {
+
+        // Instant path: pop from ready queue (same sub).
+        let mut queue = preload_queue.get_untracked();
+        let mut taken = None;
+        queue.retain(|(img, window)| {
+            if taken.is_some() {
+                return true;
+            }
             let pre_sub =
                 normalize_subreddit(&img.subreddit).unwrap_or_else(|| img.subreddit.clone());
             if !want_sub.is_empty()
                 && pre_sub.eq_ignore_ascii_case(&want_sub)
-                && !media_seen_in_session(&img, &avoid)
+                && !media_seen_in_session(img, &avoid)
             {
-                preloaded.set(None);
-                // Cancel any in-flight prefetch for the previous slot.
-                preload_gen.update(|g| *g = g.wrapping_add(1));
-                preload_busy.set(false);
-                apply_loaded_media(img, window, reset_board);
-                // Kick next prefetch only after foreground loading flag is clear.
-                start_preload();
-                return;
+                taken = Some((img.clone(), *window));
+                false
+            } else {
+                true
             }
-            // Wrong sub / already seen — drop and fetch fresh.
-            preloaded.set(None);
+        });
+        // Drop wrong-sub leftovers when user switched communities.
+        queue.retain(|(img, _)| {
+            let pre_sub =
+                normalize_subreddit(&img.subreddit).unwrap_or_else(|| img.subreddit.clone());
+            want_sub.is_empty() || pre_sub.eq_ignore_ascii_case(&want_sub)
+        });
+        preload_queue.set(queue);
+
+        if let Some((img, window)) = taken {
+            apply_loaded_media(img, window, true);
+            fill_preload_queue();
+            return;
         }
 
-        // Cancel background work; we're doing a full fetch now.
+        // Full fetch — don't cancel fill workers that still match gen unless we bump.
+        // Bump gen so old fill workers stop, then start a foreground load.
         preload_gen.update(|g| *g = g.wrapping_add(1));
         preload_busy.set(false);
 
         loading.set(true);
-
         spawn_local(async move {
             let avoid = load_session_seen_urls();
             match load_random_image(&raw, &avoid).await {
                 Ok((img, window)) => {
-                    // Foreground: still verify once so we never apply a deleted post.
                     if post_is_still_public(&img.id).await {
                         if let Some(live) = filter_live_media(img).await {
                             if !media_seen_in_session(&live, &load_session_seen_urls()) {
-                                apply_loaded_media(live, window, reset_board);
+                                apply_loaded_media(live, window, true);
                                 loading.set(false);
-                                start_preload();
+                                fill_preload_queue();
                                 return;
                             }
                         }
                     }
-                    // Fallback if verify failed: try one more full search.
                     let avoid = load_session_seen_urls();
                     match load_random_image(&raw, &avoid).await {
                         Ok((img2, window2)) => {
                             if let Some(live) = filter_live_media(img2).await {
-                                apply_loaded_media(live, window2, reset_board);
+                                apply_loaded_media(live, window2, true);
                             } else {
                                 load_status.set("Could not load playable media".into());
                             }
@@ -326,47 +341,20 @@ pub fn App() -> impl IntoView {
                 }
             }
             loading.set(false);
-            // Always try to stage the following post after a successful or failed settle.
             if image.get_untracked().is_some() {
-                start_preload();
+                fill_preload_queue();
             }
         });
     };
 
-    /// Play / Next: always reset board + load media for the current sub.
+    /// Play / Next / Next game: new board + next post for the current sub.
     let on_play = Callback::new(move |_: ()| {
-        load_media(true);
-    });
-
-    let keep_going = Callback::new(move |_: ()| {
-        board.update(|b| b.continue_after_win());
-        // New post starts blurred; unblurs as you build toward the next double.
-        // Stays on the same subreddit (does not run Random).
-        if !subreddit.get_untracked().trim().is_empty() || image.get_untracked().is_some() {
-            load_media(false);
-        }
-    });
-
-    /// Reset the board only — keep the same subreddit and the same media.
-    let try_again = Callback::new(move |_: ()| {
-        animating.set(false);
-        let g = goal.get_untracked();
-        board.update(|b| {
-            let _ = rng.try_update_value(|r| b.reset_with_goal(r, g));
-        });
-        // Re-blur current image from the start of this run.
-        reveal_from.set(2);
-        reveal_to.set(g);
-        lightbox_sharp.set(false);
-        // Keep staging the following post while they play this board again.
-        if image.get_untracked().is_some() {
-            start_preload();
-        }
+        load_media();
     });
 
     let on_clear_image = Callback::new(move |_: ()| {
         image.set(None);
-        preloaded.set(None);
+        preload_queue.set(Vec::new());
         preload_gen.update(|g| *g = g.wrapping_add(1));
         preload_busy.set(false);
         slide_index.set(0);
@@ -452,8 +440,7 @@ pub fn App() -> impl IntoView {
                         <Overlay
                             status=status
                             win_tile=win_tile
-                            on_keep_going=keep_going
-                            on_try_again=try_again
+                            on_next_game=on_play
                         />
                         <Show when=move || loading.get()>
                             <div class="board-loading" role="status" aria-live="polite">

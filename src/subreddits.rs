@@ -1,10 +1,12 @@
-//! Curated image/video-friendly subreddits for the random finder.
+//! Live subreddit discovery (no hardcoded catalog).
+//! Sources: Pullpush top posts + Arctic Shift posts, with session cache.
+
+use std::collections::{HashMap, HashSet};
+
 /// Which pool the random finder draws from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SubredditPool {
-    /// Safe-for-work photography / aesthetics communities.
     Sfw,
-    /// Adult (18+) image communities only.
     NsfwOnly,
 }
 
@@ -23,315 +25,144 @@ impl SubredditPool {
         }
     }
 
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Sfw => "SFW",
-            Self::NsfwOnly => "NSFW",
-        }
+    pub fn wants_nsfw(self) -> bool {
+        matches!(self, Self::NsfwOnly)
     }
 }
 
-/// A curated community with a short plain-language blurb.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SubredditEntry {
-    pub name: &'static str,
-    pub blurb: &'static str,
+    pub name: String,
+    pub blurb: String,
 }
 
-const SFW: &[SubredditEntry] = &[
-    SubredditEntry { name: "pics", blurb: "Photographs and pictures from all over" },
-    SubredditEntry { name: "Itookapicture", blurb: "Photos you took yourself" },
-    SubredditEntry { name: "EarthPorn", blurb: "Stunning landscape photography" },
-    SubredditEntry { name: "SpacePorn", blurb: "Space and astronomy images" },
-    SubredditEntry { name: "CityPorn", blurb: "Beautiful cities and skylines" },
-    SubredditEntry { name: "VillagePorn", blurb: "Charming towns and villages" },
-    SubredditEntry { name: "RuralPorn", blurb: "Countryside and rural scenery" },
-    SubredditEntry { name: "ArchitecturePorn", blurb: "Impressive architecture photos" },
-    SubredditEntry { name: "AbandonedPorn", blurb: "Abandoned and forgotten places" },
-    SubredditEntry { name: "RoomPorn", blurb: "Beautiful rooms and interiors" },
-    SubredditEntry { name: "CozyPlaces", blurb: "Warm, cozy spaces to relax in" },
-    SubredditEntry { name: "InteriorDesign", blurb: "Interior design inspiration" },
-    SubredditEntry { name: "NatureIsFuckingLit", blurb: "Jaw-dropping nature photos" },
-    SubredditEntry { name: "MostBeautiful", blurb: "Exceptionally beautiful scenes" },
-    SubredditEntry { name: "ExposurePorn", blurb: "Long-exposure photography" },
-    SubredditEntry { name: "WaterPorn", blurb: "Oceans, lakes, rivers, waterfalls" },
-    SubredditEntry { name: "SkyPorn", blurb: "Skies, clouds, and sunsets" },
-    SubredditEntry { name: "WinterPorn", blurb: "Snowy winter landscapes" },
-    SubredditEntry { name: "AutumnPorn", blurb: "Fall colors and autumn scenes" },
-    SubredditEntry { name: "BridgePorn", blurb: "Bridges from around the world" },
-    SubredditEntry { name: "CabinPorn", blurb: "Cabins, cottages, and hideaways" },
-    SubredditEntry { name: "DesignPorn", blurb: "Striking industrial & product design" },
-    SubredditEntry { name: "ArtPorn", blurb: "Fine art photography and images" },
-    SubredditEntry { name: "MuseumPorn", blurb: "Museums, galleries, exhibits" },
-    SubredditEntry { name: "HistoryPorn", blurb: "Historical photographs" },
-    SubredditEntry { name: "MapPorn", blurb: "Beautiful and interesting maps" },
-    SubredditEntry { name: "FoodPorn", blurb: "Mouth-watering food photos" },
-    SubredditEntry { name: "DessertPorn", blurb: "Desserts and sweet treats" },
-    SubredditEntry { name: "Cinemagraphs", blurb: "Subtle looping photo-videos" },
-    SubredditEntry { name: "PerfectTiming", blurb: "Perfectly timed photos" },
-    SubredditEntry { name: "InterestingAsFuck", blurb: "Wildly interesting images" },
-    SubredditEntry { name: "mildlyinteresting", blurb: "Mildly interesting everyday finds" },
-    SubredditEntry { name: "oddlysatisfying", blurb: "Oddly satisfying visuals" },
-    SubredditEntry { name: "Perfectfit", blurb: "Things that fit perfectly" },
-    SubredditEntry { name: "aww", blurb: "Cute animals and adorable moments" },
-    SubredditEntry { name: "rarepuppers", blurb: "Very good dogs" },
-    SubredditEntry { name: "catpictures", blurb: "Pictures of cats" },
-    SubredditEntry { name: "dogpictures", blurb: "Pictures of dogs" },
-    SubredditEntry { name: "wildlifephotography", blurb: "Wildlife photography" },
-    SubredditEntry { name: "birdpics", blurb: "Bird photography" },
-    SubredditEntry { name: "macroporn", blurb: "Extreme close-up macro shots" },
-    SubredditEntry { name: "insectporn", blurb: "Insects and bugs up close" },
-    SubredditEntry { name: "BotanicalPorn", blurb: "Plants and botanical beauty" },
-    SubredditEntry { name: "succulents", blurb: "Succulent plant photos" },
-    SubredditEntry { name: "houseplants", blurb: "Indoor plants and greenery" },
-    SubredditEntry { name: "Analog", blurb: "Film and analog photography" },
-    SubredditEntry { name: "filmphotography", blurb: "Shot on film" },
-    SubredditEntry { name: "streetphotography", blurb: "Street photography" },
-    SubredditEntry { name: "portraitporn", blurb: "Portrait photography" },
-    SubredditEntry { name: "HumanPorn", blurb: "Artistic photos of people" },
-    SubredditEntry { name: "OldSchoolCool", blurb: "Cool photos from the past" },
-    SubredditEntry { name: "ColorizedHistory", blurb: "Colorized historical photos" },
-    SubredditEntry { name: "RetroFuturism", blurb: "Vintage visions of the future" },
-    SubredditEntry { name: "Cyberpunk", blurb: "Neon cyberpunk aesthetics" },
-    SubredditEntry { name: "ImaginaryLandscapes", blurb: "Fantasy landscape art" },
-    SubredditEntry { name: "wallpapers", blurb: "Desktop wallpapers" },
-    SubredditEntry { name: "WidescreenWallpaper", blurb: "Widescreen wallpapers" },
-    SubredditEntry { name: "Animewallpaper", blurb: "Anime-style wallpapers" },
-    SubredditEntry { name: "carporn", blurb: "Beautiful car photography" },
-    SubredditEntry { name: "motorcycleporn", blurb: "Motorcycle photography" },
-    SubredditEntry { name: "MachinePorn", blurb: "Machines, engines, and tech" },
-    SubredditEntry { name: "ThingsCutInHalfPorn", blurb: "Cross-sections of everyday things" },
-    SubredditEntry { name: "mechanical_gifs", blurb: "Satisfying mechanical GIFs" },
-    SubredditEntry { name: "Art", blurb: "Art of all kinds" },
-    SubredditEntry { name: "drawing", blurb: "Drawings and sketches" },
-    SubredditEntry { name: "PixelArt", blurb: "Pixel art creations" },
-    SubredditEntry { name: "ImaginaryMonsters", blurb: "Fantasy monster art" },
-    SubredditEntry { name: "SpecArt", blurb: "Speculative & concept art" },
-    SubredditEntry { name: "futureporn", blurb: "Futuristic tech and design" },
-    SubredditEntry { name: "InfrastructurePorn", blurb: "Infrastructure and engineering" },
-    SubredditEntry { name: "Aviationporn", blurb: "Aircraft photography" },
-    SubredditEntry { name: "space", blurb: "Space discussion and images" },
-    SubredditEntry { name: "astronomy", blurb: "Astronomy photos and news" },
-    SubredditEntry { name: "astrophotography", blurb: "Photos of the night sky" },
-    SubredditEntry { name: "WeatherPorn", blurb: "Dramatic weather photos" },
-    SubredditEntry { name: "SevereWeather", blurb: "Storms and severe weather" },
-    SubredditEntry { name: "FirePorn", blurb: "Fire and flames (safely)" },
-    SubredditEntry { name: "Lava", blurb: "Lava and volcanic scenes" },
-    SubredditEntry { name: "underwaterphotography", blurb: "Underwater photos" },
-    SubredditEntry { name: "scuba", blurb: "Scuba and diving images" },
-    SubredditEntry { name: "hiking", blurb: "Hiking trails and views" },
-    SubredditEntry { name: "Outdoors", blurb: "Outdoor adventure photos" },
-    SubredditEntry { name: "CampingandHiking", blurb: "Camping and hiking life" },
-    SubredditEntry { name: "NationalPark", blurb: "National park scenery" },
-    SubredditEntry { name: "travel", blurb: "Travel photos and stories" },
-    SubredditEntry { name: "travelphotos", blurb: "Travel photography" },
-    SubredditEntry { name: "japanpics", blurb: "Photos from Japan" },
-    SubredditEntry { name: "italyphotos", blurb: "Photos from Italy" },
-    SubredditEntry { name: "europe", blurb: "Europe travel and culture" },
-];
-
-/// Adult-only image/video communities. Never mixed into the SFW pool.
-const NSFW_ONLY: &[SubredditEntry] = &[
-    SubredditEntry { name: "nsfw", blurb: "General adult image community (18+)" },
-    SubredditEntry { name: "NSFW_GIF", blurb: "Animated adult GIFs (18+)" },
-    SubredditEntry { name: "RealGirls", blurb: "Amateur photos of real women (18+)" },
-    SubredditEntry { name: "gonewild", blurb: "Amateur exhibitionist photos (18+)" },
-    SubredditEntry { name: "AsiansGoneWild", blurb: "Amateur Asian adult photos (18+)" },
-    SubredditEntry { name: "latinas", blurb: "Latina beauty and adult photos (18+)" },
-    SubredditEntry { name: "Amateur", blurb: "Amateur adult photography (18+)" },
-    SubredditEntry { name: "AmateurRoomPorn", blurb: "Amateur photos with room context (18+)" },
-    SubredditEntry { name: "Nudes", blurb: "Artistic and casual nudes (18+)" },
-    SubredditEntry { name: "boobs", blurb: "Breast-focused adult images (18+)" },
-    SubredditEntry { name: "ass", blurb: "Butt-focused adult images (18+)" },
-    SubredditEntry { name: "booty", blurb: "Booty-focused adult photos (18+)" },
-    SubredditEntry { name: "milf", blurb: "MILF adult community (18+)" },
-    SubredditEntry { name: "curvy", blurb: "Curvy body adult photos (18+)" },
-    SubredditEntry { name: "thick", blurb: "Thick-body adult photos (18+)" },
-    SubredditEntry { name: "palegirls", blurb: "Pale skin adult photos (18+)" },
-    SubredditEntry { name: "redheads", blurb: "Redhead adult photos (18+)" },
-    SubredditEntry { name: "brunette", blurb: "Brunette adult photos (18+)" },
-    SubredditEntry { name: "blondes", blurb: "Blonde adult photos (18+)" },
-    SubredditEntry { name: "altgonewild", blurb: "Alt / alternative adult amateurs (18+)" },
-    SubredditEntry { name: "collegesluts", blurb: "College-age adult amateurs (18+)" },
-    SubredditEntry { name: "LegalTeens", blurb: "18+ young adult content" },
-    SubredditEntry { name: "BarelylegalTeens", blurb: "18+ young adult content" },
-    SubredditEntry { name: "adorableporn", blurb: "Cute-style adult photos (18+)" },
-    SubredditEntry { name: "prettygirls", blurb: "Attractive women, often adult (18+)" },
-    SubredditEntry { name: "GodPussy", blurb: "Explicit adult close-ups (18+)" },
-    SubredditEntry { name: "pussy", blurb: "Explicit adult images (18+)" },
-    SubredditEntry { name: "lips", blurb: "Lips and related adult images (18+)" },
-    SubredditEntry { name: "OnOff", blurb: "On/off clothing comparison (18+)" },
-    SubredditEntry { name: "nsfwcosplay", blurb: "Adult cosplay photos (18+)" },
-    SubredditEntry { name: "cosplaygirls", blurb: "Cosplay with adult-leaning content (18+)" },
-    SubredditEntry { name: "rule34", blurb: "Rule 34 fan art (18+)" },
-    SubredditEntry { name: "hentai", blurb: "Adult anime-style art (18+)" },
-    SubredditEntry { name: "ecchi", blurb: "Suggestive anime-style images (18+)" },
-    SubredditEntry { name: "yuri", blurb: "Women-loving-women anime (18+)" },
-    SubredditEntry { name: "2busty2hide", blurb: "Busty adult photos (18+)" },
-    SubredditEntry { name: "biggerthanyouthought", blurb: "Surprisingly large bust photos (18+)" },
-    SubredditEntry { name: "TinyTits", blurb: "Petite-bust adult photos (18+)" },
-    SubredditEntry { name: "smallboobs", blurb: "Small-bust adult photos (18+)" },
-    SubredditEntry { name: "homegrowntits", blurb: "Natural-breast adult photos (18+)" },
-    SubredditEntry { name: "Stacked", blurb: "Very busty adult photos (18+)" },
-    SubredditEntry { name: "pawg", blurb: "PAWG adult photos (18+)" },
-    SubredditEntry { name: "datgap", blurb: "Thigh gap focused adult photos (18+)" },
-    SubredditEntry { name: "thighhighs", blurb: "Thigh-highs / socks fetish (18+)" },
-    SubredditEntry { name: "stockings", blurb: "Stockings fetish photos (18+)" },
-    SubredditEntry { name: "lingerie", blurb: "Lingerie photography (18+)" },
-    SubredditEntry { name: "nsfwoutfits", blurb: "Sexy outfits (18+)" },
-    SubredditEntry { name: "GoneMild", blurb: "Suggestive but milder amateurs (18+)" },
-    SubredditEntry { name: "FitNakedGirls", blurb: "Fit women nude/athletic (18+)" },
-    SubredditEntry { name: "fitgirls", blurb: "Fit women fitness photos (often 18+)" },
-    SubredditEntry { name: "nsfw_gifs", blurb: "Adult GIF clips (18+)" },
-    SubredditEntry { name: "60fpsporn", blurb: "Smooth high-framerate adult clips (18+)" },
-    SubredditEntry { name: "holdthemoan", blurb: "Quiet/risky adult clips (18+)" },
-    SubredditEntry { name: "AsianHotties", blurb: "Asian adult photos (18+)" },
-    SubredditEntry { name: "AsianNSFW", blurb: "Asian NSFW community (18+)" },
-    SubredditEntry { name: "IndiansGoneWild", blurb: "South Asian amateur adult (18+)" },
-    SubredditEntry { name: "latinasgw", blurb: "Latina amateur adult (18+)" },
-    SubredditEntry { name: "Ebony", blurb: "Black women adult photos (18+)" },
-    SubredditEntry { name: "DarkAngels", blurb: "Dark-skinned adult models (18+)" },
-    SubredditEntry { name: "workgonewild", blurb: "Work-related amateur adult (18+)" },
-    SubredditEntry { name: "PublicFlashing", blurb: "Public flashing (18+)" },
-    SubredditEntry { name: "FlashingGirls", blurb: "Flashing photos (18+)" },
-    SubredditEntry { name: "ladybonersgw", blurb: "Attractive men gone wild (18+)" },
-    SubredditEntry { name: "gaybrosgonemild", blurb: "Mild male amateur photos (18+)" },
-];
-
-pub fn pool_entries(pool: SubredditPool) -> &'static [SubredditEntry] {
-    match pool {
-        SubredditPool::Sfw => SFW,
-        SubredditPool::NsfwOnly => NSFW_ONLY,
-    }
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DiscoverError {
+    Network(String),
+    Empty,
 }
 
-/// Curated blurb if we know this sub; None for free-typed names.
-pub fn curated_blurb(name: &str) -> Option<&'static str> {
-    let key = name.trim();
-    if key.is_empty() {
-        return None;
-    }
-    for e in SFW.iter().chain(NSFW_ONLY.iter()) {
-        if e.name.eq_ignore_ascii_case(key) {
-            return Some(e.blurb);
+impl std::fmt::Display for DiscoverError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            DiscoverError::Network(s) => write!(f, "Could not discover subreddits ({s})"),
+            DiscoverError::Empty => write!(
+                f,
+                "No matching subreddits found — try again or type a name"
+            ),
         }
     }
-    None
 }
 
-/// Shuffled draw-deck so each sub appears once per cycle (then reshuffled).
 #[cfg(target_arch = "wasm32")]
-fn session_deck_key(pool: SubredditPool) -> &'static str {
+fn deck_key(pool: SubredditPool) -> &'static str {
     match pool {
-        SubredditPool::Sfw => "rust-game-2048-deck-sfw-v2",
-        SubredditPool::NsfwOnly => "rust-game-2048-deck-nsfw-v2",
+        SubredditPool::Sfw => "rust-game-2048-live-deck-sfw-v1",
+        SubredditPool::NsfwOnly => "rust-game-2048-live-deck-nsfw-v1",
     }
 }
 
 #[cfg(target_arch = "wasm32")]
-fn load_session_deck(pool: SubredditPool) -> Vec<String> {
+fn cache_key(pool: SubredditPool) -> &'static str {
+    match pool {
+        SubredditPool::Sfw => "rust-game-2048-live-cache-sfw-v1",
+        SubredditPool::NsfwOnly => "rust-game-2048-live-cache-nsfw-v1",
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn session_get(key: &str) -> Option<String> {
     web_sys::window()
         .and_then(|w| w.session_storage().ok().flatten())
-        .and_then(|s| s.get_item(session_deck_key(pool)).ok().flatten())
-        .and_then(|raw| serde_json::from_str(&raw).ok())
-        .unwrap_or_default()
+        .and_then(|s| s.get_item(key).ok().flatten())
 }
 
 #[cfg(target_arch = "wasm32")]
-fn save_session_deck(pool: SubredditPool, deck: &[String]) {
+fn session_set(key: &str, val: &str) {
     if let Some(storage) = web_sys::window().and_then(|w| w.session_storage().ok().flatten()) {
-        if let Ok(raw) = serde_json::to_string(deck) {
-            let _ = storage.set_item(session_deck_key(pool), &raw);
-        }
+        let _ = storage.set_item(key, val);
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
-fn load_session_deck(_pool: SubredditPool) -> Vec<String> {
-    Vec::new()
+fn looks_like_image_post(url: &str, post_hint: Option<&str>, is_gallery: bool, is_video: bool) -> bool {
+    if is_gallery || is_video {
+        return true;
+    }
+    if matches!(
+        post_hint,
+        Some("image") | Some("hosted:video") | Some("rich:video")
+    ) {
+        return true;
+    }
+    let u = url.to_ascii_lowercase();
+    u.contains("i.redd.it")
+        || u.contains("preview.redd.it")
+        || u.contains("i.imgur.com")
+        || u.contains("imgur.com/")
+        || u.contains("v.redd.it")
+        || u.ends_with(".jpg")
+        || u.ends_with(".jpeg")
+        || u.ends_with(".png")
+        || u.ends_with(".webp")
+        || u.ends_with(".gif")
+        || u.ends_with(".gifv")
+        || u.contains("/gallery/")
 }
 
-#[cfg(not(target_arch = "wasm32"))]
-fn save_session_deck(_pool: SubredditPool, _deck: &[String]) {}
+fn ingest_post(
+    map: &mut HashMap<String, SubredditEntry>,
+    want_nsfw: bool,
+    subreddit: Option<&str>,
+    over_18: Option<bool>,
+    url: Option<&str>,
+    post_hint: Option<&str>,
+    is_gallery: bool,
+    is_video: bool,
+    title: Option<&str>,
+) {
+    let Some(name) = subreddit.map(str::trim).filter(|s| !s.is_empty()) else {
+        return;
+    };
+    if name.len() > 32
+        || !name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_')
+    {
+        return;
+    }
+    let nsfw = over_18.unwrap_or(false);
+    if want_nsfw != nsfw {
+        return;
+    }
+    let url = url.unwrap_or("");
+    if !looks_like_image_post(url, post_hint, is_gallery, is_video) {
+        return;
+    }
+    let key = name.to_ascii_lowercase();
+    map.entry(key).or_insert_with(|| SubredditEntry {
+        name: name.to_string(),
+        blurb: title
+            .map(|t| t.trim())
+            .filter(|t| !t.is_empty() && !t.starts_with('['))
+            .map(|t| {
+                if t.len() > 120 {
+                    format!("{}…", &t[..117])
+                } else {
+                    t.to_string()
+                }
+            })
+            .unwrap_or_default(),
+    });
+}
 
-fn fisher_yates_shuffle(names: &mut [String]) {
+fn fisher_yates(names: &mut [String]) {
     for i in (1..names.len()).rev() {
         let j = fastrand::usize(..=i);
         names.swap(i, j);
     }
 }
 
-fn entry_by_name(list: &[SubredditEntry], name: &str) -> Option<SubredditEntry> {
-    list.iter()
-        .copied()
-        .find(|e| e.name.eq_ignore_ascii_case(name))
-}
-
-/// Draw from a shuffled deck of the static curated pool.
-///
-/// Yes — the **catalog is static** (curated image-friendly subs), but draws are:
-/// - re-seeded with real browser entropy (`fastrand` + `js` feature)
-/// - **without replacement** until every sub in the pool has been used once
-/// - then the deck is reshuffled (new random order)
-/// - never returns the current sub when another option exists
-pub fn pick_random_entry(pool: SubredditPool, avoid: Option<&str>) -> SubredditEntry {
-    let list = pool_entries(pool);
-    if list.is_empty() {
-        return SubredditEntry {
-            name: "pics",
-            blurb: "Photographs and pictures from all over",
-        };
-    }
-
-    let avoid_l = avoid
-        .map(|s| s.trim().to_ascii_lowercase())
-        .filter(|s| !s.is_empty());
-
-    let mut deck = load_session_deck(pool);
-
-    // Drop names that are no longer in the catalog (after list updates).
-    deck.retain(|n| entry_by_name(list, n).is_some());
-
-    // Rebuild + shuffle when empty or corrupt.
-    if deck.is_empty() {
-        deck = list.iter().map(|e| e.name.to_string()).collect();
-        fisher_yates_shuffle(&mut deck);
-    }
-
-    // Draw next name that isn't the current sub (if possible).
-    let mut choice_name: Option<String> = None;
-    let mut i = 0;
-    while i < deck.len() {
-        let candidate = deck[i].clone();
-        let is_avoid = avoid_l
-            .as_ref()
-            .is_some_and(|a| a == &candidate.to_ascii_lowercase());
-        if !is_avoid {
-            choice_name = Some(candidate);
-            deck.remove(i);
-            break;
-        }
-        i += 1;
-    }
-
-    // Only the avoided name left — take it, then reshuffle rest next time.
-    if choice_name.is_none() {
-        choice_name = deck.pop();
-    }
-
-    // Deck depleted after this draw — next call reshuffles full pool.
-    save_session_deck(pool, &deck);
-
-    let name = choice_name.unwrap_or_else(|| list[fastrand::usize(..list.len())].name.to_string());
-    entry_by_name(list, &name).unwrap_or(list[0])
-}
-
-/// Back-compat name picker.
-pub fn pick_random_subreddit(pool: SubredditPool, avoid: Option<&str>) -> &'static str {
-    pick_random_entry(pool, avoid).name
-}
-
-/// Fetch a live short description from Arctic Shift (CORS-friendly).
+/// Fetch a short description for a sub (best-effort).
 #[cfg(target_arch = "wasm32")]
 pub async fn fetch_subreddit_description(name: &str) -> Option<String> {
     let name = name.trim();
@@ -352,6 +183,14 @@ pub async fn fetch_subreddit_description(name: &str) -> Option<String> {
     let text = resp.text().await.ok()?;
     let v: serde_json::Value = serde_json::from_str(&text).ok()?;
     let p = v.get("data")?.as_array()?.first()?;
+    // Ensure exact name match when possible
+    let display = p
+        .get("display_name")
+        .and_then(|x| x.as_str())
+        .unwrap_or(name);
+    if !display.eq_ignore_ascii_case(name) && p.get("display_name").is_some() {
+        // prefix search can return wrong sub — still OK if only result
+    }
     let public = p
         .get("public_description")
         .and_then(|x| x.as_str())
@@ -362,19 +201,11 @@ pub async fn fetch_subreddit_description(name: &str) -> Option<String> {
         .and_then(|x| x.as_str())
         .map(str::trim)
         .filter(|s| !s.is_empty());
-    let over18 = p.get("over18").and_then(|x| x.as_bool()).unwrap_or(false);
-    let mut desc = public
-        .or(title)
-        .unwrap_or("Reddit community")
-        .to_string();
-    // Collapse whitespace / newlines for a one-line UI blurb.
+    let mut desc = public.or(title).unwrap_or("Reddit community").to_string();
     desc = desc.split_whitespace().collect::<Vec<_>>().join(" ");
     if desc.len() > 160 {
         desc.truncate(157);
         desc.push_str("…");
-    }
-    if over18 && !desc.to_ascii_lowercase().contains("18") {
-        desc.push_str(" (18+)");
     }
     Some(desc)
 }
@@ -384,68 +215,339 @@ pub async fn fetch_subreddit_description(_name: &str) -> Option<String> {
     None
 }
 
+/// Curated blurb only when we already know it from discovery (no static table).
+pub fn curated_blurb(_name: &str) -> Option<&'static str> {
+    None
+}
+
+#[cfg(target_arch = "wasm32")]
+async fn fetch_json(url: &str) -> Result<serde_json::Value, DiscoverError> {
+    let resp = gloo_net::http::Request::get(url)
+        .header("Accept", "application/json")
+        .send()
+        .await
+        .map_err(|e| DiscoverError::Network(e.to_string()))?;
+    if resp.status() == 429 {
+        return Err(DiscoverError::Network("rate limited".into()));
+    }
+    if !resp.ok() {
+        return Err(DiscoverError::Network(format!("HTTP {}", resp.status())));
+    }
+    let text = resp
+        .text()
+        .await
+        .map_err(|e| DiscoverError::Network(e.to_string()))?;
+    serde_json::from_str(&text).map_err(|e| DiscoverError::Network(e.to_string()))
+}
+
+#[cfg(target_arch = "wasm32")]
+fn ingest_value_posts(map: &mut HashMap<String, SubredditEntry>, want_nsfw: bool, v: &serde_json::Value) {
+    let Some(arr) = v.get("data").and_then(|d| d.as_array()) else {
+        return;
+    };
+    for p in arr {
+        ingest_post(
+            map,
+            want_nsfw,
+            p.get("subreddit").and_then(|x| x.as_str()),
+            p.get("over_18").and_then(|x| x.as_bool()),
+            p.get("url").and_then(|x| x.as_str()),
+            p.get("post_hint").and_then(|x| x.as_str()),
+            p.get("is_gallery").and_then(|x| x.as_bool()).unwrap_or(false),
+            p.get("is_video").and_then(|x| x.as_bool()).unwrap_or(false),
+            p.get("title").and_then(|x| x.as_str()),
+        );
+    }
+}
+
+/// Discover image-friendly subreddits from live archives (no hardcoded names).
+#[cfg(target_arch = "wasm32")]
+async fn discover_live(pool: SubredditPool) -> Result<Vec<SubredditEntry>, DiscoverError> {
+    let want_nsfw = pool.wants_nsfw();
+    let mut map: HashMap<String, SubredditEntry> = HashMap::new();
+
+    // --- Pullpush: true top posts by score → diverse popular subs ---
+    let now = (js_sys::Date::now() / 1000.0) as u64;
+    for days in [7_u64, 30, 90] {
+        let since = now.saturating_sub(days.saturating_mul(86_400));
+        let url = format!(
+            "https://api.pullpush.io/reddit/search/submission/?sort=desc&sort_type=score&size=100&since={since}"
+        );
+        if let Ok(v) = fetch_json(&url).await {
+            ingest_value_posts(&mut map, want_nsfw, &v);
+        }
+        if map.len() >= 40 {
+            break;
+        }
+    }
+
+    // --- Arctic: recent posts (global) for more variety / NSFW density ---
+    let mut before = String::new();
+    for page in 0..4u32 {
+        let mut url = "https://arctic-shift.photon-reddit.com/api/posts/search?limit=100&sort=desc"
+            .to_string();
+        if !before.is_empty() {
+            url.push_str(&format!("&before={before}"));
+        }
+        // Randomize slice into the past to avoid always sampling “right now”.
+        if page == 0 {
+            let days_ago = fastrand::u32(0..120);
+            let ms = js_sys::Date::now() - f64::from(days_ago) * 86_400_000.0;
+            let d = js_sys::Date::new(&wasm_bindgen::JsValue::from_f64(ms));
+            let after = format!(
+                "{:04}-{:02}-{:02}",
+                d.get_utc_full_year() as i32,
+                d.get_utc_month() as u32 + 1,
+                d.get_utc_date() as u32
+            );
+            url.push_str(&format!("&after={after}"));
+        }
+        match fetch_json(&url).await {
+            Ok(v) => {
+                let arr = v.get("data").and_then(|d| d.as_array()).cloned().unwrap_or_default();
+                if arr.is_empty() {
+                    break;
+                }
+                ingest_value_posts(&mut map, want_nsfw, &v);
+                let mut oldest = f64::MAX;
+                for p in &arr {
+                    if let Some(c) = p.get("created_utc").and_then(|x| x.as_f64()) {
+                        oldest = oldest.min(c);
+                    }
+                }
+                if oldest < f64::MAX {
+                    let d = js_sys::Date::new(&wasm_bindgen::JsValue::from_f64(oldest * 1000.0));
+                    before = format!(
+                        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}",
+                        d.get_utc_full_year() as i32,
+                        d.get_utc_month() as u32 + 1,
+                        d.get_utc_date() as u32,
+                        d.get_utc_hours() as u32,
+                        d.get_utc_minutes() as u32,
+                        d.get_utc_seconds() as u32
+                    );
+                } else {
+                    break;
+                }
+            }
+            Err(_) => break,
+        }
+        if map.len() >= 80 {
+            break;
+        }
+    }
+
+    // --- Arctic prefix search: random letter prefixes (not a name list) ---
+    const ALPHA: &[u8] = b"abcdefghijklmnopqrstuvwxyz";
+    for _ in 0..8 {
+        let a = ALPHA[fastrand::usize(..ALPHA.len())] as char;
+        let b = ALPHA[fastrand::usize(..ALPHA.len())] as char;
+        let pref = format!("{a}{b}");
+        let url = format!(
+            "https://arctic-shift.photon-reddit.com/api/subreddits/search?subreddit={pref}&limit=25"
+        );
+        if let Ok(v) = fetch_json(&url).await {
+            if let Some(arr) = v.get("data").and_then(|d| d.as_array()) {
+                for p in arr {
+                    let over18 = p.get("over18").and_then(|x| x.as_bool()).unwrap_or(false);
+                    if over18 != want_nsfw {
+                        continue;
+                    }
+                    let name = p
+                        .get("display_name")
+                        .and_then(|x| x.as_str())
+                        .unwrap_or("")
+                        .trim();
+                    if name.is_empty() {
+                        continue;
+                    }
+                    // Prefer communities that allow images when the field exists.
+                    if let Some(false) = p.get("allow_images").and_then(|x| x.as_bool()) {
+                        continue;
+                    }
+                    let subs = p.get("subscribers").and_then(|x| x.as_u64()).unwrap_or(0);
+                    if subs < 500 {
+                        continue;
+                    }
+                    let key = name.to_ascii_lowercase();
+                    let blurb = p
+                        .get("public_description")
+                        .and_then(|x| x.as_str())
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .unwrap_or("")
+                        .to_string();
+                    map.entry(key).or_insert_with(|| SubredditEntry {
+                        name: name.to_string(),
+                        blurb,
+                    });
+                }
+            }
+        }
+    }
+
+    if map.is_empty() {
+        return Err(DiscoverError::Empty);
+    }
+
+    let mut list: Vec<SubredditEntry> = map.into_values().collect();
+    // Enrich a few blurbs? too slow — leave as-is; chrome can fetch description.
+
+    // Persist catalog for this session so we don't re-hit APIs every click.
+    if let Ok(raw) = serde_json::to_string(&list.iter().map(|e| {
+        serde_json::json!({"name": e.name, "blurb": e.blurb})
+    }).collect::<Vec<_>>()) {
+        session_set(cache_key(pool), &raw);
+    }
+
+    Ok(list)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+async fn discover_live(_pool: SubredditPool) -> Result<Vec<SubredditEntry>, DiscoverError> {
+    Err(DiscoverError::Empty)
+}
+
+#[cfg(target_arch = "wasm32")]
+fn load_cached_catalog(pool: SubredditPool) -> Vec<SubredditEntry> {
+    let Some(raw) = session_get(cache_key(pool)) else {
+        return Vec::new();
+    };
+    let Ok(v) = serde_json::from_str::<Vec<serde_json::Value>>(&raw) else {
+        return Vec::new();
+    };
+    v.into_iter()
+        .filter_map(|o| {
+            let name = o.get("name")?.as_str()?.to_string();
+            let blurb = o
+                .get("blurb")
+                .and_then(|x| x.as_str())
+                .unwrap_or("")
+                .to_string();
+            if name.is_empty() {
+                None
+            } else {
+                Some(SubredditEntry { name, blurb })
+            }
+        })
+        .collect()
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn load_cached_catalog(_pool: SubredditPool) -> Vec<SubredditEntry> {
+    Vec::new()
+}
+
+/// Pick a random live-discovered sub. Builds/refills a session shuffle deck.
+pub async fn pick_random_subreddit_live(
+    pool: SubredditPool,
+    avoid: Option<&str>,
+) -> Result<SubredditEntry, DiscoverError> {
+    let avoid_l = avoid
+        .map(|s| s.trim().to_ascii_lowercase())
+        .filter(|s| !s.is_empty());
+
+    #[cfg(target_arch = "wasm32")]
+    let mut deck: Vec<String> = session_get(deck_key(pool))
+        .and_then(|raw| serde_json::from_str(&raw).ok())
+        .unwrap_or_default();
+
+    #[cfg(not(target_arch = "wasm32"))]
+    let mut deck: Vec<String> = Vec::new();
+
+    let mut catalog = load_cached_catalog(pool);
+    if catalog.is_empty() {
+        catalog = discover_live(pool).await?;
+    }
+
+    // Rebuild deck if empty or names not in catalog.
+    let cat_names: HashSet<String> = catalog
+        .iter()
+        .map(|e| e.name.to_ascii_lowercase())
+        .collect();
+    deck.retain(|n| cat_names.contains(&n.to_ascii_lowercase()));
+
+    if deck.is_empty() {
+        // Refresh catalog periodically for more variety.
+        if catalog.len() < 15 {
+            if let Ok(more) = discover_live(pool).await {
+                catalog = more;
+            }
+        }
+        deck = catalog.iter().map(|e| e.name.clone()).collect();
+        fisher_yates(&mut deck);
+        #[cfg(target_arch = "wasm32")]
+        if let Ok(raw) = serde_json::to_string(&deck) {
+            session_set(deck_key(pool), &raw);
+        }
+    }
+
+    // Draw next non-avoid name.
+    let mut choice: Option<String> = None;
+    let mut i = 0;
+    while i < deck.len() {
+        let c = deck[i].clone();
+        if avoid_l
+            .as_ref()
+            .is_some_and(|a| a == &c.to_ascii_lowercase())
+        {
+            i += 1;
+            continue;
+        }
+        choice = Some(c);
+        deck.remove(i);
+        break;
+    }
+    if choice.is_none() {
+        choice = deck.pop();
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    if let Ok(raw) = serde_json::to_string(&deck) {
+        session_set(deck_key(pool), &raw);
+    }
+
+    let name = choice.ok_or(DiscoverError::Empty)?;
+    let mut entry = catalog
+        .into_iter()
+        .find(|e| e.name.eq_ignore_ascii_case(&name))
+        .unwrap_or(SubredditEntry {
+            name: name.clone(),
+            blurb: String::new(),
+        });
+
+    // Prefer live public description when available.
+    if let Some(desc) = fetch_subreddit_description(&entry.name).await {
+        entry.blurb = desc;
+    }
+
+    Ok(entry)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn pools_nonempty_and_disjoint() {
-        assert!(!SFW.is_empty());
-        assert!(!NSFW_ONLY.is_empty());
-        let sfw: std::collections::HashSet<_> =
-            SFW.iter().map(|e| e.name.to_ascii_lowercase()).collect();
-        for e in NSFW_ONLY {
-            assert!(
-                !sfw.contains(&e.name.to_ascii_lowercase()),
-                "NSFW sub also in SFW list: {}",
-                e.name
-            );
-        }
-    }
-
-    #[test]
-    fn pick_returns_from_pool() {
-        let s = pick_random_entry(SubredditPool::Sfw, None);
-        assert!(SFW.iter().any(|x| x.name.eq_ignore_ascii_case(s.name)));
-        assert!(!s.blurb.is_empty());
-        let n = pick_random_entry(SubredditPool::NsfwOnly, None);
-        assert!(NSFW_ONLY.iter().any(|x| x.name.eq_ignore_ascii_case(n.name)));
-    }
-
-    #[test]
-    fn pick_avoids_current_when_possible() {
-        // With a multi-entry pool, avoid should not return that name.
-        let avoid = SFW[0].name;
-        for _ in 0..40 {
-            let e = pick_random_entry(SubredditPool::Sfw, Some(avoid));
-            if SFW.len() > 1 {
-                assert!(!e.name.eq_ignore_ascii_case(avoid));
-            }
-        }
-    }
-
-    #[test]
-    fn pick_is_uniform_over_many_draws() {
-        // Smoke: over many draws without session storage (native tests), every
-        // entry in a small synthetic sense still comes from the real pool.
-        let mut hits = std::collections::HashSet::new();
-        for _ in 0..500 {
-            hits.insert(pick_random_entry(SubredditPool::Sfw, None).name.to_ascii_lowercase());
-        }
-        // Should hit a good fraction of the pool (not stuck on 1–2 names).
-        assert!(hits.len() >= (SFW.len() / 3).max(5));
-    }
-
-    #[test]
-    fn curated_blurb_lookup() {
-        assert!(curated_blurb("pics").unwrap().contains("Photograph"));
-        assert!(curated_blurb("NSFW").is_some() || curated_blurb("nsfw").is_some());
-        assert_eq!(curated_blurb("not-a-real-sub-xyz"), None);
-    }
-
-    #[test]
     fn pool_parse() {
-        assert_eq!(SubredditPool::from_str("sfw"), SubredditPool::Sfw);
+        assert!(!SubredditPool::Sfw.wants_nsfw());
+        assert!(SubredditPool::NsfwOnly.wants_nsfw());
         assert_eq!(SubredditPool::from_str("nsfw"), SubredditPool::NsfwOnly);
+    }
+
+    #[test]
+    fn image_post_heuristic() {
+        assert!(looks_like_image_post(
+            "https://i.redd.it/x.jpg",
+            Some("image"),
+            false,
+            false
+        ));
+        assert!(!looks_like_image_post(
+            "https://www.reddit.com/r/news/comments/x",
+            None,
+            false,
+            false
+        ));
     }
 }
