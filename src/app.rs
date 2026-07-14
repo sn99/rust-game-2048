@@ -160,6 +160,7 @@ pub fn App() -> impl IntoView {
         push_recent_media_urls(img.items.iter().map(|i| i.url.clone()));
         warm_media_cache(&img);
 
+        // Title lives only in the reveal panel — don't duplicate it in the chrome status.
         let kind_bit = if img.has_video() && img.is_multi() {
             format!(" · {} clips/photos", img.items.len())
         } else if img.has_video() {
@@ -169,18 +170,7 @@ pub fn App() -> impl IntoView {
         } else {
             String::new()
         };
-        let title_bit = if img.title.is_empty() {
-            String::new()
-        } else {
-            let t = if img.title.len() > 50 {
-                format!("{}…", &img.title[..47])
-            } else {
-                img.title.clone()
-            };
-            format!(" — {t}")
-        };
-        // Status without r/sub — chrome already shows the community + blurb.
-        load_status.set(format!("{window}{kind_bit}{title_bit}"));
+        load_status.set(format!("{window}{kind_bit}"));
         slide_index.set(0);
         image.set(Some(img));
         lightbox_sharp.set(false);

@@ -199,6 +199,18 @@ pub fn Chrome(
             </div>
 
             <div class="chrome-row chrome-row-meta" aria-live="polite">
+                <p class="chrome-meta-status">
+                    {move || {
+                        let st = status.get();
+                        let st = st.trim();
+                        if st.is_empty() {
+                            String::new()
+                        } else {
+                            st.to_string()
+                        }
+                    }}
+                </p>
+                <span class="chrome-meta-sep" aria-hidden="true"></span>
                 <p class="chrome-meta-blurb">
                     {move || {
                         let name = subreddit.get();
@@ -213,34 +225,7 @@ pub fn Chrome(
                         }
                     }}
                 </p>
-                <span class="chrome-meta-sep" aria-hidden="true"></span>
-                <p class="chrome-meta-status">
-                    {move || {
-                        let name = subreddit.get();
-                        let st = status.get();
-                        strip_redundant_sub_prefix(st.trim(), name.trim())
-                    }}
-                </p>
             </div>
         </header>
     }
-}
-
-fn strip_redundant_sub_prefix(status: &str, name: &str) -> String {
-    let mut s = status.to_string();
-    if !name.is_empty() {
-        let prefixes = [
-            format!("r/{name} · "),
-            format!("r/{name} — "),
-            format!("r/{name}: "),
-            format!("r/{name} "),
-        ];
-        for p in prefixes {
-            if s.to_ascii_lowercase().starts_with(&p.to_ascii_lowercase()) {
-                s = s[p.len()..].to_string();
-                break;
-            }
-        }
-    }
-    s
 }

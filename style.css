@@ -282,28 +282,30 @@ body {
   cursor: wait;
 }
 
-/* Meta: blurb uses free space (left), status right — no forced ellipsis */
+/* Meta: short load hint left · subreddit description right-aligned */
 .chrome-row-meta {
   gap: 10px;
   align-items: flex-start;
   padding-top: 1px;
+  justify-content: space-between;
 }
 
-.chrome-meta-blurb {
+.chrome-meta-status {
   margin: 0;
-  flex: 1 1 auto;
+  flex: 0 1 auto;
   min-width: 0;
+  max-width: 40%;
   text-align: left;
   font-size: 12px;
   line-height: 1.4;
-  opacity: 0.82;
+  opacity: 0.72;
   white-space: normal;
   overflow: visible;
   word-break: break-word;
 }
 
 .chrome-meta-sep {
-  display: none; /* shown on desktop when both sides present */
+  display: none;
   flex: 0 0 auto;
   width: 1px;
   align-self: stretch;
@@ -312,14 +314,14 @@ body {
   background: rgba(119, 110, 101, 0.2);
 }
 
-.chrome-meta-status {
+.chrome-meta-blurb {
   margin: 0;
-  flex: 0 1 42%;
+  flex: 1 1 auto;
   min-width: 0;
   text-align: right;
   font-size: 12px;
   line-height: 1.4;
-  opacity: 0.78;
+  opacity: 0.85;
   white-space: normal;
   overflow: visible;
   word-break: break-word;
@@ -328,6 +330,11 @@ body {
 .chrome-meta-status:empty,
 .chrome-meta-blurb:empty {
   display: none;
+}
+
+/* When only the description is present, keep it full-width right-aligned */
+.chrome-meta-status:empty ~ .chrome-meta-blurb {
+  flex: 1 1 100%;
 }
 
 .btn {
@@ -1044,8 +1051,13 @@ video.lightbox-img {
   }
 
   .chrome-meta-status {
-    flex: 0 1 38%;
-    max-width: 420px;
+    flex: 0 0 auto;
+    max-width: 28%;
+  }
+
+  .chrome-meta-blurb {
+    flex: 1 1 auto;
+    text-align: right;
   }
 
   .play-layout {
@@ -1179,7 +1191,13 @@ video.lightbox-img {
 
   .chrome-meta-status {
     flex: 1 1 100%;
+    max-width: 100%;
     text-align: left;
+  }
+
+  .chrome-meta-blurb {
+    flex: 1 1 100%;
+    text-align: right;
   }
 
   .chrome-row-meta {
