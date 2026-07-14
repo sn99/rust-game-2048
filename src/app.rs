@@ -1,6 +1,5 @@
 use crate::components::{
-    BoardView, DifficultyBar, Header, ImagePanel, Lightbox, Overlay, RevealBackground,
-    SubredditBar,
+    BoardView, Header, ImagePanel, Lightbox, Overlay, RevealBackground, TopBar,
 };
 use crate::difficulty::clamp_target;
 use crate::game::{Board, Direction};
@@ -414,7 +413,16 @@ pub fn App() -> impl IntoView {
                 win_tile=win_tile
                 on_new_game=new_game
             />
-            <DifficultyBar target=win_tile on_select=on_select_goal />
+            <TopBar
+                target=win_tile
+                on_select=on_select_goal
+                subreddit=subreddit
+                pool=subreddit_pool
+                status=load_status.into()
+                loading=loading.into()
+                on_load=on_load_image
+                has_image=has_image
+            />
 
             <div class="play-layout">
                 <section class="play-game">
@@ -450,14 +458,6 @@ pub fn App() -> impl IntoView {
                 </section>
 
                 <aside class="play-media">
-                    <SubredditBar
-                        subreddit=subreddit
-                        pool=subreddit_pool
-                        status=load_status.into()
-                        loading=loading.into()
-                        on_load=on_load_image
-                        has_image=has_image
-                    />
                     <ImagePanel
                         items=media_items
                         image_title=image_title

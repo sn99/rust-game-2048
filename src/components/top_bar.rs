@@ -1,3 +1,6 @@
+//! Compact top controls: goal difficulty + subreddit/random in one bar.
+
+use crate::difficulty::{self, TARGETS};
 use crate::storage::{save_subreddit, save_subreddit_pool};
 use crate::subreddits::{
     curated_blurb, fetch_subreddit_description, pick_random_entry, SubredditPool,
@@ -6,7 +9,9 @@ use leptos::prelude::*;
 use wasm_bindgen_futures::spawn_local;
 
 #[component]
-pub fn SubredditBar(
+pub fn TopBar(
+    target: Signal<u32>,
+    on_select: Callback<u32>,
     subreddit: RwSignal<String>,
     pool: RwSignal<SubredditPool>,
     status: Signal<String>,
@@ -14,13 +19,12 @@ pub fn SubredditBar(
     on_load: Callback<()>,
     has_image: Signal<bool>,
 ) -> impl IntoView {
-    // Shown under the sub name: curated blurb, then refined from archive API.
     let description = RwSignal::new(String::new());
     let desc_gen = RwSignal::new(0u32);
 
     let refresh_description = move |name: String| {
         let curated = curated_blurb(&name).unwrap_or("").to_string();
-        description.set(curated.clone());
+        description.set(curated);
         let gen = desc_gen.get_untracked() + 1;
         desc_gen.set(gen);
         if name.trim().is_empty() {
@@ -32,12 +36,11 @@ pub fn SubredditBar(
                     description.set(live);
                 }
             } else if desc_gen.get_untracked() == gen && description.get_untracked().is_empty() {
-                description.set(format!("r/{name} — custom subreddit"));
+                description.set("custom subreddit".into());
             }
         });
     };
 
-    // Initial description for restored sub.
     {
         let initial = subreddit.get_untracked();
         if !initial.trim().is_empty() {
@@ -46,8 +49,7 @@ pub fn SubredditBar(
     }
 
     let load_named = move || {
-        let name = subreddit.get_untracked();
-        refresh_description(name);
+        refresh_description(subreddit.get_untracked());
         on_load.run(());
     };
 
@@ -76,17 +78,45 @@ pub fn SubredditBar(
     };
 
     view! {
-        <section class="panel subreddit-bar compact-panel">
-            <div class="sub-section">
-                <h3 class="panel-title">"Your subreddit"</h3>
-                <p class="sub-section-hint">
-                    "Type any community name, then load media for this run."
-                </p>
-                <div class="subreddit-row">
+        <section class="panel top-bar compact-panel" aria-label="Goal and subreddit">
+            <div class="top-bar-row">
+                <div class="top-bar-goal" role="group" aria-label="Difficulty — win target">
+                    <span class="panel-title inline-title">"Goal"</span>
+                    <div class="difficulty-buttons">
+                        {TARGETS
+                            .iter()
+                            .copied()
+                            .map(|t| {
+                                view! {
+                                    <button
+                                        type="button"
+                                        class=move || {
+                                            if target.get() == t {
+                                                "diff-btn diff-btn-active"
+                                            } else {
+                                                "diff-btn"
+                                            }
+                                        }
+                                        title=format!("{} — reach {}", difficulty::label(t), t)
+                                        on:click=move |_| on_select.run(t)
+                                    >
+                                        <span class="diff-value">{t}</span>
+                                        <span class="diff-name">{difficulty::label(t)}</span>
+                                    </button>
+                                }
+                            })
+                            .collect_view()}
+                    </div>
+                </div>
+
+                <div class="top-bar-divider" aria-hidden="true"></div>
+
+                <div class="top-bar-sub" role="group" aria-label="Subreddit">
+                    <span class="panel-title inline-title">"Sub"</span>
                     <span class="subreddit-prefix" aria-hidden="true">"r/"</span>
                     <input
                         id="subreddit-input"
-                        class="subreddit-input"
+                        class="subreddit-input top-bar-input"
                         type="text"
                         prop:value=move || subreddit.get()
                         prop:disabled=move || loading.get()
@@ -97,7 +127,6 @@ pub fn SubredditBar(
                         on:input=move |ev| {
                             let v = event_target_value(&ev);
                             subreddit.set(v.clone());
-                            // Instant curated blurb while typing known names.
                             if let Some(b) = curated_blurb(&v) {
                                 description.set(b.to_string());
                             } else if v.trim().is_empty() {
@@ -119,73 +148,53 @@ pub fn SubredditBar(
                     >
                         {move || {
                             if loading.get() {
-                                "Loading…"
+                                "…"
                             } else if has_image.get() {
-                                "New image"
+                                "New"
                             } else {
                                 "Load"
                             }
                         }}
                     </button>
-                </div>
-                <p class="subreddit-description" aria-live="polite">
-                    {move || {
-                        let name = subreddit.get();
-                        let desc = description.get();
-                        let name = name.trim();
-                        if name.is_empty() {
-                            String::new()
-                        } else if desc.is_empty() {
-                            format!("r/{name}")
-                        } else {
-                            format!("r/{name} — {desc}")
-                        }
-                    }}
-                </p>
-            </div>
-
-            <div class="sub-section sub-section-discover">
-                <h3 class="panel-title">"Surprise me"</h3>
-                <p class="sub-section-hint">
-                    "Picks a random image-friendly community for you and loads it. "
-                    "Not related to the text box above until it fills one in."
-                </p>
-                <div class="discover-row">
                     <button
                         type="button"
                         class="btn btn-discover btn-discover-sfw"
                         prop:disabled=move || loading.get()
-                        title="Random safe-for-work photography / aesthetics subreddit"
+                        title="Random SFW subreddit"
                         on:click=move |_| on_random_pool(SubredditPool::Sfw)
                     >
-                        {move || {
-                            if loading.get() && pool.get() == SubredditPool::Sfw {
-                                "Finding…"
-                            } else {
-                                "Random SFW"
-                            }
-                        }}
+                        "SFW"
                     </button>
                     <button
                         type="button"
                         class="btn btn-discover btn-discover-nsfw"
                         prop:disabled=move || loading.get()
-                        title="Random adult (18+) image subreddit only"
+                        title="Random NSFW (18+) subreddit"
                         on:click=move |_| on_random_pool(SubredditPool::NsfwOnly)
                     >
-                        {move || {
-                            if loading.get() && pool.get() == SubredditPool::NsfwOnly {
-                                "Finding…"
-                            } else {
-                                "Random NSFW (18+)"
-                            }
-                        }}
+                        "NSFW"
                     </button>
                 </div>
             </div>
-
-            <p class="subreddit-status">
-                {move || status.get()}
+            <p class="top-bar-meta" aria-live="polite">
+                {move || {
+                    let name = subreddit.get();
+                    let name = name.trim().to_string();
+                    let desc = description.get();
+                    let st = status.get();
+                    let mut parts = Vec::new();
+                    if !name.is_empty() {
+                        if desc.is_empty() {
+                            parts.push(format!("r/{name}"));
+                        } else {
+                            parts.push(format!("r/{name} — {desc}"));
+                        }
+                    }
+                    if !st.is_empty() {
+                        parts.push(st);
+                    }
+                    parts.join(" · ")
+                }}
             </p>
         </section>
     }

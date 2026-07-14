@@ -299,55 +299,72 @@ body {
   opacity: 0.85;
 }
 
-/* Subreddit */
-.sub-section {
-  margin-bottom: 10px;
+/* Top bar: Goal + Subreddit (saves space for image) */
+.top-bar {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
 }
 
-.sub-section .panel-title {
-  margin: 0 0 2px;
-}
-
-.sub-section-hint {
-  margin: 0 0 8px;
-  font-size: 12px;
-  line-height: 1.35;
-  opacity: 0.75;
-}
-
-.sub-section-discover {
-  padding-top: 10px;
-  border-top: 1px dashed #dfd3c3;
-  margin-top: 4px;
-}
-
-.discover-row {
+.top-bar-row {
   display: flex;
   flex-wrap: wrap;
-  gap: 8px;
+  align-items: center;
+  gap: 10px 14px;
 }
 
-.btn-discover {
-  flex: 1 1 120px;
-  white-space: nowrap;
-  min-height: 40px;
+.top-bar-goal,
+.top-bar-sub {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 8px;
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.top-bar-sub {
+  flex: 1 1 260px;
+}
+
+.top-bar-divider {
+  width: 1px;
+  align-self: stretch;
+  min-height: 28px;
+  background: #dfd3c3;
+  flex: 0 0 auto;
+}
+
+.top-bar-input {
+  flex: 1 1 100px;
+  min-width: 90px;
+  max-width: 180px;
+  padding: 7px 10px;
   font-size: 14px;
+}
+
+.top-bar .btn-load {
+  padding: 7px 12px;
+  font-size: 13px;
+}
+
+.top-bar .btn-discover {
+  padding: 7px 10px;
+  font-size: 12.5px;
+  font-weight: 700;
+  border: 0;
+  border-radius: 8px;
+  color: #f9f6f2;
+  cursor: pointer;
+  white-space: nowrap;
 }
 
 .btn-discover-sfw {
   background: #8f7a66;
 }
 
-.btn-discover-sfw:hover:not(:disabled) {
-  filter: brightness(1.06);
-}
-
 .btn-discover-nsfw {
   background: #a65d52;
-}
-
-.btn-discover-nsfw:hover:not(:disabled) {
-  filter: brightness(1.06);
 }
 
 .btn-discover:disabled {
@@ -355,6 +372,18 @@ body {
   cursor: wait;
 }
 
+.top-bar-meta {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.35;
+  opacity: 0.8;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-height: 1.2em;
+}
+
+/* Subreddit input bits reused in top bar */
 .subreddit-row {
   display: flex;
   flex-wrap: wrap;
@@ -366,14 +395,6 @@ body {
   font-weight: 800;
   opacity: 0.65;
   flex: 0 0 auto;
-}
-
-.subreddit-description {
-  margin: 6px 0 0;
-  font-size: 12.5px;
-  line-height: 1.4;
-  color: #776e65;
-  min-height: 1.2em;
 }
 
 .subreddit-input {
@@ -395,16 +416,6 @@ body {
 
 .subreddit-input:disabled {
   opacity: 0.6;
-}
-
-.subreddit-status {
-  margin: 8px 0 0;
-  font-size: 12.5px;
-  line-height: 1.35;
-  min-height: 1.2em;
-  opacity: 0.85;
-  padding-top: 8px;
-  border-top: 1px solid #eee4da;
 }
 
 /* Image panel — full image, contain */
@@ -433,11 +444,9 @@ body {
 .image-frame {
   position: relative;
   width: 100%;
-  /* At least as large as the puzzle when space allows */
-  min-height: min(var(--board-size), 70vw);
-  max-height: min(70vh, calc(var(--board-size) + 40px));
-  aspect-ratio: 1;
-  /* flex:1 / free height applied on desktop */
+  min-height: 160px;
+  max-height: min(38vh, 320px);
+  /* flex:1 applied on desktop */
   border-radius: 10px;
   background:
     linear-gradient(45deg, #e8dfd0 25%, transparent 25%),
@@ -456,13 +465,13 @@ body {
 
 .image-frame-img,
 video.image-frame-img {
+
   display: block;
-  width: 100%;
-  height: 100%;
   max-width: 100%;
-  max-height: 100%;
+  max-height: min(38vh, 320px);
+  width: auto;
+  height: auto;
   object-fit: contain;
-  object-position: center;
   transition: filter 320ms ease, opacity 320ms ease;
   will-change: filter, opacity;
 }
@@ -960,8 +969,7 @@ video.lightbox-img {
     flex: 1;
     min-height: 0;
     display: grid;
-    /* Media column at least as wide as the board so the image can match */
-    grid-template-columns: auto minmax(var(--board-size), 1fr);
+    grid-template-columns: auto minmax(280px, 1fr);
     gap: var(--play-gap);
     align-items: stretch;
     overflow: hidden;
@@ -969,75 +977,43 @@ video.lightbox-img {
 
   .play-game {
     align-items: center;
-    justify-content: flex-start;
+    justify-content: center;
     min-height: 0;
     overflow: hidden;
-    /* Board column height follows content; media stretches beside it */
-    align-self: stretch;
   }
 
   .play-media {
     min-height: 0;
-    min-width: var(--board-size);
     overflow: hidden;
     display: flex;
     flex-direction: column;
-    gap: 6px;
-    /* Match board column height when possible */
-    height: 100%;
+    gap: 0;
   }
 
-  .subreddit-bar {
-    flex: 0 0 auto;
+  .top-bar {
+    flex-shrink: 0;
     margin: 0;
     padding: 6px 10px;
   }
 
-  .sub-section {
-    margin-bottom: 6px;
+  .top-bar-divider {
+    display: block;
   }
 
-  .sub-section-discover {
-    padding-top: 6px;
-    margin-top: 2px;
-  }
-
-  .sub-section-hint {
-    display: none;
-  }
-
-  .subreddit-description {
-    margin: 2px 0 0;
+  .top-bar-meta {
     font-size: 11.5px;
-    display: -webkit-box;
-    -webkit-line-clamp: 1;
-    -webkit-box-orient: vertical;
-    overflow: hidden;
   }
 
-  .subreddit-status {
-    margin: 2px 0 0;
-    padding-top: 4px;
-    font-size: 11.5px;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-  }
-
-  .btn-discover {
-    min-height: 32px;
-    font-size: 12.5px;
-    padding: 6px 8px;
+  .top-bar-input {
+    max-width: 140px;
   }
 
   .image-panel {
-    flex: 1 1 auto;
-    min-height: var(--board-size);
+    flex: 1;
+    min-height: 0;
     margin: 0;
     padding: 8px 12px 10px;
     overflow: hidden;
-    display: flex;
-    flex-direction: column;
   }
 
   .image-panel-head {
@@ -1053,23 +1029,17 @@ video.lightbox-img {
   }
 
   .image-frame {
-    flex: 1 1 var(--board-size);
-    min-height: var(--board-size);
-    min-width: 0;
-    width: 100%;
+    flex: 1;
+    min-height: 0;
     max-height: none;
-    /* Prefer a square viewport at least as large as the board */
-    aspect-ratio: auto;
-    height: auto;
+    height: 100%;
   }
 
   .image-frame-img,
-  video.image-frame-img {
-    width: 100%;
-    height: 100%;
+video.image-frame-img {
+
     max-height: 100%;
     max-width: 100%;
-    object-fit: contain;
   }
 
   .image-panel-hint {
@@ -1093,29 +1063,27 @@ video.lightbox-img {
 
 @media (min-width: 1200px) {
   :root {
-    --app-width: min(1280px, 96vw);
+    --app-width: min(1240px, 96vw);
     --board-size: min(460px, calc(100dvh - 140px));
     --cell: calc((var(--board-size) - var(--gap) * 5) / 4);
   }
 
   .play-layout {
-    grid-template-columns: auto minmax(var(--board-size), 1fr);
+    grid-template-columns: auto minmax(320px, 1fr);
     gap: 18px;
-  }
-
-  .image-frame {
-    min-height: var(--board-size);
-  }
-}
-
-/* Tall windows: give image extra room beyond the board square */
-@media (min-width: 900px) and (min-height: 780px) {
-  .image-frame {
-    min-height: max(var(--board-size), min(520px, calc(100dvh - 280px)));
   }
 }
 
 @media (max-width: 480px) {
+  .top-bar-divider {
+    display: none;
+  }
+
+  .top-bar-input {
+    max-width: none;
+    flex: 1 1 120px;
+  }
+
   .header-bottom {
     flex-direction: column;
     align-items: stretch;
