@@ -139,6 +139,9 @@ struct PostData {
     title: Option<String>,
     url: Option<String>,
     permalink: Option<String>,
+    author: Option<String>,
+    /// Set when mods/admins removed the post (or spam/etc.).
+    removed_by_category: Option<String>,
     #[allow(dead_code)]
     over_18: Option<bool>,
     post_hint: Option<String>,
@@ -225,6 +228,9 @@ fn posts_to_media(posts: Vec<PostData>, subreddit: &str) -> Result<Vec<RedditMed
     let mut out = Vec::new();
     let mut seen_keys = HashSet::new();
     for p in posts {
+        if post_is_unavailable(&p) {
+            continue;
+        }
         let items = collect_post_media(&p);
         if items.is_empty() {
             continue;
@@ -256,6 +262,37 @@ fn posts_to_media(posts: Vec<PostData>, subreddit: &str) -> Result<Vec<RedditMed
     } else {
         Ok(out)
     }
+}
+
+
+fn post_is_unavailable(p: &PostData) -> bool {
+    if p.removed_by_category.is_some() {
+        return true;
+    }
+    match p.title.as_deref().map(str::trim) {
+        Some("[deleted]") | Some("[removed]") => return true,
+        _ => {}
+    }
+    // Fully deleted accounts with no usable hosted media left.
+    if p.author.as_deref() == Some("[deleted]") {
+        let has_video = p
+            .media
+            .as_ref()
+            .and_then(|m| m.reddit_video.as_ref())
+            .or_else(|| p.secure_media.as_ref().and_then(|m| m.reddit_video.as_ref()))
+            .and_then(|v| v.fallback_url.as_ref())
+            .is_some();
+        let has_gallery = p.gallery_data.is_some();
+        let has_i_reddit = p
+            .url
+            .as_ref()
+            .map(|u| u.contains("i.redd.it") || u.contains("preview.redd.it"))
+            .unwrap_or(false);
+        if !has_video && !has_gallery && !has_i_reddit {
+            return true;
+        }
+    }
+    false
 }
 
 fn collect_post_media(p: &PostData) -> Vec<MediaItem> {
@@ -313,8 +350,11 @@ fn gallery_items(p: &PostData) -> Option<Vec<MediaItem>> {
     for item in items {
         let id = item.media_id.as_ref()?;
         let m = meta.get(id)?;
-        if m.status.as_deref() == Some("failed") {
-            continue;
+        // Reddit marks deleted gallery files as failed / invalid.
+        if let Some(status) = m.status.as_deref() {
+            if status != "valid" {
+                continue;
+            }
         }
         if m.e.as_deref() == Some("RedditVideo") {
             // Rare in galleries; skip without a clean mp4 field
@@ -420,6 +460,7 @@ fn decode_url(url: &str) -> String {
     url.replace("&amp;", "&")
 }
 
+#[allow(dead_code)]
 pub fn pick_random_image(images: &[RedditMedia], avoid_urls: &[String]) -> Option<RedditMedia> {
     if images.is_empty() {
         return None;
@@ -570,8 +611,183 @@ pub async fn load_random_image(
 ) -> Result<(RedditMedia, &'static str), RedditError> {
     let sub = normalize_subreddit(raw_sub).ok_or(RedditError::InvalidSubreddit)?;
     let (images, window) = fetch_images_with_fallback(&sub).await?;
-    let img = pick_random_image(&images, avoid_urls).ok_or(RedditError::NoImages)?;
-    Ok((img, window))
+    if images.is_empty() {
+        return Err(RedditError::NoImages);
+    }
+
+    // Prefer unseen, then any — try several so deleted hosts get skipped.
+    let mut order: Vec<usize> = (0..images.len()).collect();
+    // Fisher–Yates shuffle
+    for i in (1..order.len()).rev() {
+        let j = fastrand::usize(..=i);
+        order.swap(i, j);
+    }
+    order.sort_by_key(|&i| {
+        let u = images[i].primary_url();
+        avoid_urls.iter().any(|a| a == u)
+    });
+
+    let mut attempts = 0usize;
+    for idx in order {
+        if attempts >= 15 {
+            break;
+        }
+        attempts += 1;
+        let candidate = images[idx].clone();
+        if let Some(live) = filter_live_media(candidate).await {
+            return Ok((live, window));
+        }
+    }
+    Err(RedditError::NoImages)
+}
+
+/// Keep only media that still loads (filters Reddit-deleted files).
+pub async fn filter_live_media(media: RedditMedia) -> Option<RedditMedia> {
+    let mut live = Vec::with_capacity(media.items.len());
+    for item in media.items {
+        if media_item_is_available(&item).await {
+            live.push(item);
+        }
+    }
+    if live.is_empty() {
+        None
+    } else {
+        Some(RedditMedia {
+            items: live,
+            title: media.title,
+            permalink: media.permalink,
+            subreddit: media.subreddit,
+        })
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+async fn media_item_is_available(item: &MediaItem) -> bool {
+    match item.kind {
+        MediaKind::Image => probe_image(&item.url).await,
+        MediaKind::Video => probe_video(&item.url).await,
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+async fn media_item_is_available(_item: &MediaItem) -> bool {
+    true
+}
+
+#[cfg(target_arch = "wasm32")]
+async fn probe_image(url: &str) -> bool {
+    use js_sys::Promise;
+    use wasm_bindgen::closure::Closure;
+    use wasm_bindgen::JsCast;
+    use wasm_bindgen::JsValue;
+
+    let Ok(img) = web_sys::HtmlImageElement::new() else {
+        return false;
+    };
+    // Don't set crossOrigin: many CDNs fail CORS on decode check; load/error still works.
+    let url = url.to_string();
+    let promise = Promise::new(&mut |resolve, _reject| {
+        let img_ok = img.clone();
+        let resolve_ok = resolve.clone();
+        let onload = Closure::once(move || {
+            let ok = img_ok.natural_width() > 1 && img_ok.natural_height() > 1;
+            let _ = resolve_ok.call1(&JsValue::NULL, &JsValue::from_bool(ok));
+        });
+        let resolve_err = resolve.clone();
+        let onerror = Closure::once(move || {
+            let _ = resolve_err.call1(&JsValue::NULL, &JsValue::from_bool(false));
+        });
+        img.set_onload(Some(onload.as_ref().unchecked_ref()));
+        img.set_onerror(Some(onerror.as_ref().unchecked_ref()));
+        img.set_src(&url);
+        onload.forget();
+        onerror.forget();
+    });
+    // Race with timeout so we don't hang forever
+    let raced = promise_race_timeout(promise, 8_000);
+    match wasm_bindgen_futures::JsFuture::from(raced).await {
+        Ok(v) => v.as_bool().unwrap_or(false),
+        Err(_) => false,
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+async fn probe_video(url: &str) -> bool {
+    use js_sys::Promise;
+    use std::cell::Cell;
+    use std::rc::Rc;
+    use wasm_bindgen::closure::Closure;
+    use wasm_bindgen::JsCast;
+    use wasm_bindgen::JsValue;
+
+    let Some(doc) = web_sys::window().and_then(|w| w.document()) else {
+        return false;
+    };
+    let Ok(el) = doc.create_element("video") else {
+        return false;
+    };
+    let Ok(vid) = el.dyn_into::<web_sys::HtmlVideoElement>() else {
+        return false;
+    };
+    vid.set_preload("metadata");
+    vid.set_muted(true);
+    let url = url.to_string();
+    let promise = Promise::new(&mut |resolve, _reject| {
+        let done = Rc::new(Cell::new(false));
+        let resolve = Rc::new(resolve);
+        let finish = {
+            let done = done.clone();
+            let resolve = resolve.clone();
+            Rc::new(move |ok: bool| {
+                if done.replace(true) {
+                    return;
+                }
+                let _ = resolve.call1(&JsValue::NULL, &JsValue::from_bool(ok));
+            }) as Rc<dyn Fn(bool)>
+        };
+        let f1 = finish.clone();
+        let onok = Closure::wrap(Box::new(move || f1(true)) as Box<dyn FnMut()>);
+        let f2 = finish.clone();
+        let onerror = Closure::wrap(Box::new(move || f2(false)) as Box<dyn FnMut()>);
+        let _ = vid.add_event_listener_with_callback("loadedmetadata", onok.as_ref().unchecked_ref());
+        let _ = vid.add_event_listener_with_callback("error", onerror.as_ref().unchecked_ref());
+        vid.set_src(&url);
+        let _ = vid.load();
+        onok.forget();
+        onerror.forget();
+    });
+    let raced = promise_race_timeout(promise, 10_000);
+    match wasm_bindgen_futures::JsFuture::from(raced).await {
+        Ok(v) => v.as_bool().unwrap_or(false),
+        Err(_) => false,
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn promise_race_timeout(promise: js_sys::Promise, ms: i32) -> js_sys::Promise {
+    use js_sys::Promise;
+    use wasm_bindgen::closure::Closure;
+    use wasm_bindgen::JsCast;
+    use wasm_bindgen::JsValue;
+
+    let timeout = Promise::new(&mut |resolve, _reject| {
+        let resolve = resolve.clone();
+        let cb = Closure::once(move || {
+            let _ = resolve.call1(&JsValue::NULL, &JsValue::from_bool(false));
+        });
+        let _ = web_sys::window().map(|w| {
+            w.set_timeout_with_callback_and_timeout_and_arguments_0(
+                cb.as_ref().unchecked_ref(),
+                ms,
+            )
+        });
+        cb.forget();
+    });
+    // Promise.race([probe, timeout])
+    let arr = js_sys::Array::new();
+    arr.push(&promise);
+    arr.push(&timeout);
+    Promise::race(&arr)
 }
 
 #[cfg(test)]
@@ -639,5 +855,30 @@ mod tests {
         let item = media_from_url("https://i.imgur.com/ZenTaxR.gifv", None).unwrap();
         assert_eq!(item.kind, MediaKind::Video);
         assert_eq!(item.url, "https://i.imgur.com/ZenTaxR.mp4");
+    }
+
+    #[test]
+    fn skips_removed_posts() {
+        let json = r#"{
+          "data": [
+            {
+              "title": "[deleted]",
+              "url": "https://i.redd.it/x.jpg",
+              "permalink": "/r/pics/comments/1/",
+              "author": "[deleted]",
+              "removed_by_category": "moderator"
+            },
+            {
+              "title": "Alive",
+              "url": "https://i.redd.it/ok.jpg",
+              "permalink": "/r/pics/comments/2/",
+              "author": "someone",
+              "post_hint": "image"
+            }
+          ]
+        }"#;
+        let items = extract_images(json, "pics").unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].primary_url(), "https://i.redd.it/ok.jpg");
     }
 }
