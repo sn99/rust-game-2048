@@ -134,7 +134,7 @@ fn ingest_post(
     post_hint: Option<&str>,
     is_gallery: bool,
     is_video: bool,
-    title: Option<&str>,
+    _title: Option<&str>,
 ) {
     let Some(name) = subreddit.map(str::trim).filter(|s| !s.is_empty()) else {
         return;
@@ -155,19 +155,11 @@ fn ingest_post(
         return;
     }
     let key = name.to_ascii_lowercase();
+    // Never store post titles as the community description — those belong to posts.
+    // Real blurbs come from fetch_subreddit_description (public_description).
     map.entry(key).or_insert_with(|| SubredditEntry {
         name: name.to_string(),
-        blurb: title
-            .map(|t| t.trim())
-            .filter(|t| !t.is_empty() && !t.starts_with('['))
-            .map(|t| {
-                if t.len() > 120 {
-                    format!("{}…", &t[..117])
-                } else {
-                    t.to_string()
-                }
-            })
-            .unwrap_or_default(),
+        blurb: String::new(),
     });
 }
 
@@ -178,7 +170,7 @@ fn fisher_yates(names: &mut [String]) {
     }
 }
 
-/// Fetch a short description for a sub (best-effort).
+/// Fetch a short community description (public_description / sub title — never a post title).
 #[cfg(target_arch = "wasm32")]
 pub async fn fetch_subreddit_description(name: &str) -> Option<String> {
     let name = name.trim();
@@ -186,7 +178,7 @@ pub async fn fetch_subreddit_description(name: &str) -> Option<String> {
         return None;
     }
     let url = format!(
-        "https://arctic-shift.photon-reddit.com/api/subreddits/search?subreddit={name}&limit=1"
+        "https://arctic-shift.photon-reddit.com/api/subreddits/search?subreddit={name}&limit=5"
     );
     let resp = gloo_net::http::Request::get(&url)
         .header("Accept", "application/json")
@@ -198,26 +190,38 @@ pub async fn fetch_subreddit_description(name: &str) -> Option<String> {
     }
     let text = resp.text().await.ok()?;
     let v: serde_json::Value = serde_json::from_str(&text).ok()?;
-    let p = v.get("data")?.as_array()?.first()?;
-    // Ensure exact name match when possible
+    let arr = v.get("data")?.as_array()?;
+    // Prefer exact display_name match (API can return unrelated rows).
+    let p = arr
+        .iter()
+        .find(|p| {
+            p.get("display_name")
+                .and_then(|x| x.as_str())
+                .is_some_and(|d| d.eq_ignore_ascii_case(name))
+        })
+        .or_else(|| arr.first())?;
     let display = p
         .get("display_name")
         .and_then(|x| x.as_str())
         .unwrap_or(name);
-    if !display.eq_ignore_ascii_case(name) && p.get("display_name").is_some() {
-        // prefix search can return wrong sub — still OK if only result
+    if !display.eq_ignore_ascii_case(name) {
+        return None;
     }
     let public = p
         .get("public_description")
         .and_then(|x| x.as_str())
         .map(str::trim)
         .filter(|s| !s.is_empty());
-    let title = p
+    // Subreddit "title" is the community headline (e.g. "Reddit Pics"), not a post.
+    let community_title = p
         .get("title")
         .and_then(|x| x.as_str())
         .map(str::trim)
         .filter(|s| !s.is_empty());
-    let mut desc = public.or(title).unwrap_or("Reddit community").to_string();
+    let mut desc = public
+        .or(community_title)
+        .unwrap_or("Reddit community")
+        .to_string();
     desc = desc.split_whitespace().collect::<Vec<_>>().join(" ");
     if desc.len() > 160 {
         desc.truncate(157);
@@ -643,11 +647,10 @@ pub async fn pick_random_subreddit_live(
             blurb: String::new(),
         });
 
-    // Only one optional description call when discovery left blurb empty.
-    if entry.blurb.is_empty() {
-        if let Some(desc) = fetch_subreddit_description(&entry.name).await {
-            entry.blurb = desc;
-        }
+    // Always load real community about text (ignore any stale post-title blurb in cache).
+    entry.blurb.clear();
+    if let Some(desc) = fetch_subreddit_description(&entry.name).await {
+        entry.blurb = desc;
     }
 
     Ok(entry)

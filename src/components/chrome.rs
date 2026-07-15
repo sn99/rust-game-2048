@@ -77,8 +77,10 @@ pub fn Chrome(
                     }
                     subreddit.set(entry.name.clone());
                     save_subreddit(&entry.name);
+                    // Real community description only (never a post title from discovery).
                     if entry.blurb.is_empty() {
-                        description.set(format!("r/{}", entry.name));
+                        description.set(String::new());
+                        refresh_description(entry.name.clone());
                     } else {
                         description.set(entry.blurb);
                     }
