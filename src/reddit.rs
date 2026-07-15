@@ -963,29 +963,37 @@ pub fn media_seen_in_session(media: &RedditMedia, seen: &[String]) -> bool {
         || (!media.id.is_empty() && seen.iter().any(|s| s == &media.id || s.ends_with(&format!("/{}", media.id))))
 }
 
+/// How thoroughly to validate posts after the listing response.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LoadTier {
+    /// Metadata + non-tombstone URLs only — minimal latency for UI.
+    Fast,
+    /// Batch id re-verify + CDN probe for each kept post — higher quality queue.
+    Quality,
+}
+
 pub async fn load_random_image(
     raw_sub: &str,
     avoid_urls: &[String],
 ) -> Result<(RedditMedia, &'static str), RedditError> {
-    let mut batch = load_media_batch(raw_sub, avoid_urls, 1).await?;
-    batch
-        .pop()
-        .ok_or(RedditError::NoImages)
+    let mut batch = load_media_batch(raw_sub, avoid_urls, 1, LoadTier::Fast).await?;
+    batch.pop().ok_or(RedditError::NoImages)
 }
 
-/// Fetch up to `count` ready posts with **minimal API calls**:
-/// ideally 1 listing request + 1 batch id re-verify, then local media probes.
-/// Used to fill the prefetch queue without N separate full searches.
+/// Fetch up to `count` posts.
+/// - [`LoadTier::Fast`]: one listing, no id re-verify, no CDN probe.
+/// - [`LoadTier::Quality`]: listing + batch id re-verify + probe only kept posts.
 pub async fn load_media_batch(
     raw_sub: &str,
     avoid_urls: &[String],
     count: usize,
+    tier: LoadTier,
 ) -> Result<Vec<(RedditMedia, &'static str)>, RedditError> {
     let sub = normalize_subreddit(raw_sub).ok_or(RedditError::InvalidSubreddit)?;
     if count == 0 {
         return Ok(Vec::new());
     }
-    load_media_batch_for_sub(&sub, avoid_urls, count).await
+    load_media_batch_for_sub(&sub, avoid_urls, count, tier).await
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -993,37 +1001,28 @@ async fn load_media_batch_for_sub(
     sub: &str,
     avoid_urls: &[String],
     count: usize,
+    tier: LoadTier,
 ) -> Result<Vec<(RedditMedia, &'static str)>, RedditError> {
-    // New wave of requests — abort anything still running from a skipped sub.
-    let _signal = take_abort_signal();
+    // Fast waves get a fresh abort controller; quality upgrades share it only if nothing else runs.
+    if tier == LoadTier::Fast {
+        let _ = take_abort_signal();
+    }
     let mut last_err = RedditError::NoImages;
 
-    // Fast path: one Arctic page for the last week (soft score floor 0 = take anything usable).
-    match fetch_arctic_window(sub, Some(7), 1, 0).await {
-        Ok(posts) => {
-            match try_pick_batch_from_posts(posts, sub, avoid_urls, 0, count).await {
-                Ok(media) if !media.is_empty() => {
-                    return Ok(media.into_iter().map(|m| (m, "top week")).collect());
+    // Prefer week listing; one recent fallback if empty.
+    for (label, days) in [("top week", Some(7_i64)), ("recent", None)] {
+        match fetch_arctic_window(sub, days, 1, 0).await {
+            Ok(posts) => {
+                match try_pick_batch_from_posts(posts, sub, avoid_urls, 0, count, tier).await {
+                    Ok(media) if !media.is_empty() => {
+                        return Ok(media.into_iter().map(|m| (m, label)).collect());
+                    }
+                    Ok(_) => last_err = RedditError::NoImages,
+                    Err(e) => last_err = e,
                 }
-                Ok(_) => last_err = RedditError::NoImages,
-                Err(e) => last_err = e,
             }
+            Err(e) => last_err = e,
         }
-        Err(e) => last_err = e,
-    }
-
-    // One fallback only if week listing empty/unusable.
-    match fetch_arctic_window(sub, None, 1, 0).await {
-        Ok(posts) => {
-            match try_pick_batch_from_posts(posts, sub, avoid_urls, 0, count).await {
-                Ok(media) if !media.is_empty() => {
-                    return Ok(media.into_iter().map(|m| (m, "recent")).collect());
-                }
-                Ok(_) => last_err = RedditError::NoImages,
-                Err(e) => last_err = e,
-            }
-        }
-        Err(e) => last_err = e,
     }
 
     Err(last_err)
@@ -1034,20 +1033,21 @@ async fn load_media_batch_for_sub(
     _sub: &str,
     _avoid_urls: &[String],
     _count: usize,
+    _tier: LoadTier,
 ) -> Result<Vec<(RedditMedia, &'static str)>, RedditError> {
     Err(RedditError::Network("browser only".into()))
 }
 
-/// Fast pick from one listing: trust listing metadata + non-tombstone URLs.
-/// **No CDN probes, no second id re-verify** — prioritizes idle time over perfect accuracy.
+/// Pick up to `max_n` posts from a listing.
+/// Fast: metadata only. Quality: re-verify ids + CDN-probe only the posts we keep.
 async fn try_pick_batch_from_posts(
     posts: Vec<serde_json::Value>,
     sub: &str,
     avoid_urls: &[String],
     soft_min_score: i64,
     max_n: usize,
+    tier: LoadTier,
 ) -> Result<Vec<RedditMedia>, RedditError> {
-    // Prefer explicitly public posts; fall back to “not known dead” if needed.
     let mut public: Vec<serde_json::Value> = posts
         .iter()
         .filter(|p| json_post_is_public(p))
@@ -1080,7 +1080,25 @@ async fn try_pick_batch_from_posts(
         public
     };
 
-    let top: Vec<serde_json::Value> = ranked.into_iter().take(TOP_POOL_SIZE).collect();
+    let mut top: Vec<serde_json::Value> = ranked.into_iter().take(TOP_POOL_SIZE).collect();
+    if top.is_empty() {
+        return Err(RedditError::NoImages);
+    }
+
+    // Quality: one batch archive re-check for the candidate pool.
+    if tier == LoadTier::Quality {
+        let ids: Vec<String> = top.iter().filter_map(json_post_id).collect();
+        let public_ids = reverify_public_ids(&ids).await;
+        top.retain(|p| {
+            json_post_id(p)
+                .map(|id| public_ids.contains(&id))
+                .unwrap_or(false)
+        });
+        if top.is_empty() {
+            return Err(RedditError::NoImages);
+        }
+    }
+
     let mut media_list = posts_json_to_media(top, sub)?;
     media_list.retain(|m| !media_seen_in_session(m, avoid_urls) && !m.id.is_empty());
     for m in &mut media_list {
@@ -1091,19 +1109,47 @@ async fn try_pick_batch_from_posts(
         return Err(RedditError::NoImages);
     }
 
-    // Light shuffle among the first few for variety (still score-leaning).
     let shuffle_n = media_list.len().min(max_n.saturating_mul(2).max(4));
     for i in (1..shuffle_n).rev() {
         let j = fastrand::usize(..=i);
         media_list.swap(i, j);
     }
 
-    // Take up to max_n immediately — zero extra network.
-    let out: Vec<RedditMedia> = media_list.into_iter().take(max_n).collect();
-    if out.is_empty() {
-        Err(RedditError::NoImages)
-    } else {
-        Ok(out)
+    match tier {
+        LoadTier::Fast => {
+            // Zero extra network — return immediately.
+            let out: Vec<RedditMedia> = media_list.into_iter().take(max_n).collect();
+            if out.is_empty() {
+                Err(RedditError::NoImages)
+            } else {
+                Ok(out)
+            }
+        }
+        LoadTier::Quality => {
+            // CDN-probe only posts we keep (+ a couple of spares).
+            let max_probes = max_n.saturating_add(2);
+            let mut out = Vec::with_capacity(max_n.min(media_list.len()));
+            let mut probes = 0usize;
+            for candidate in media_list {
+                if out.len() >= max_n || probes >= max_probes {
+                    break;
+                }
+                if media_seen_in_session(&candidate, avoid_urls) {
+                    continue;
+                }
+                probes += 1;
+                if let Some(live) = filter_live_media(candidate).await {
+                    if !media_seen_in_session(&live, avoid_urls) && !live.items.is_empty() {
+                        out.push(live);
+                    }
+                }
+            }
+            if out.is_empty() {
+                Err(RedditError::NoImages)
+            } else {
+                Ok(out)
+            }
+        }
     }
 }
 

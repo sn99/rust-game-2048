@@ -9,7 +9,7 @@ use crate::input::{
 use crate::progress::reveal_progress_range;
 use crate::reddit::{
     abort_active_fetches, load_media_batch, load_random_image, media_seen_in_session,
-    normalize_subreddit, warm_media_cache, RedditMedia,
+    normalize_subreddit, warm_media_cache, LoadTier, RedditMedia,
 };
 use crate::subreddits::warm_community_caches;
 use crate::storage::{
@@ -188,9 +188,15 @@ pub fn App() -> impl IntoView {
         abort_active_fetches();
     };
 
-    /// One batched API wave fills missing queue slots (not 1 request per post).
+    fn same_sub(a: &str, b: &str) -> bool {
+        match (normalize_subreddit(a), normalize_subreddit(b)) {
+            (Some(x), Some(y)) => x.eq_ignore_ascii_case(&y),
+            _ => a.trim().eq_ignore_ascii_case(b.trim()),
+        }
+    }
+
+    /// Fast fill: metadata-only posts so Next is ready soon.
     let fill_preload_queue = move || {
-        // (3) Never prefetch when the queue already has enough.
         if loading.get_untracked() || preload_busy.get_untracked() {
             return;
         }
@@ -229,17 +235,15 @@ pub fn App() -> impl IntoView {
                 }
             });
 
-            // Single batch path: ~1 listing + 1 id-reverify for up to `need` posts.
-            if let Ok(batch) = load_media_batch(&raw, &avoid, need).await {
+            if let Ok(batch) =
+                load_media_batch(&raw, &avoid, need, LoadTier::Fast).await
+            {
                 if preload_gen.get_untracked() != gen {
                     preload_busy.set(false);
                     return;
                 }
-                // Still the same sub the user wants?
                 let still = subreddit.get_untracked();
-                if normalize_subreddit(&still).as_deref() != normalize_subreddit(&raw).as_deref()
-                    && !still.eq_ignore_ascii_case(&raw)
-                {
+                if !same_sub(&still, &raw) {
                     preload_busy.set(false);
                     return;
                 }
@@ -260,6 +264,45 @@ pub fn App() -> impl IntoView {
                 }
             }
             preload_busy.set(false);
+        });
+    };
+
+    /// Background: re-verify + CDN-probe better posts and **replace** the queue when ready.
+    /// Does not block Play/Next — only upgrades what you'll get later.
+    let refine_queue_quality = move || {
+        let raw = subreddit.get_untracked();
+        if raw.trim().is_empty() {
+            return;
+        }
+        let gen = preload_gen.get_untracked();
+        spawn_local(async move {
+            let mut avoid = load_session_seen_urls();
+            if let Some(cur) = image.get_untracked() {
+                for it in &cur.items {
+                    avoid.push(it.url.clone());
+                }
+            }
+            // Quality path: ids re-check + live media probe for up to PRELOAD_TARGET posts.
+            let Ok(batch) =
+                load_media_batch(&raw, &avoid, PRELOAD_TARGET, LoadTier::Quality).await
+            else {
+                return;
+            };
+            if preload_gen.get_untracked() != gen {
+                return;
+            }
+            let still = subreddit.get_untracked();
+            if !same_sub(&still, &raw) {
+                return;
+            }
+            if batch.is_empty() {
+                return;
+            }
+            for (m, _) in &batch {
+                warm_media_cache(m);
+            }
+            // Upgrade queue: verified posts replace the fast/metadata-only ones.
+            preload_queue.set(batch);
         });
     };
 
@@ -297,12 +340,12 @@ pub fn App() -> impl IntoView {
         preload_queue.set(queue);
 
         if let Some((img, window)) = taken {
-            // Instant: no loading overlay, no abort of useful preloads for this sub.
+            // Instant path from queue (fast-tier and/or quality-refined).
             apply_loaded_media(img, window, true);
-            // Cancel only a *competing* foreground load, keep same-sub prefetch.
             load_gen.update(|g| *g = g.wrapping_add(1));
             loading.set(false);
             fill_preload_queue();
+            refine_queue_quality();
             return;
         }
 
@@ -315,7 +358,6 @@ pub fn App() -> impl IntoView {
         abort_active_fetches();
 
         // Only hard-block the board on the *first* media load (no image yet).
-        // When swapping posts, keep playing the current board (no idle spinner).
         let first_load = image.get_untracked().is_none();
         if first_load {
             loading.set(true);
@@ -324,8 +366,14 @@ pub fn App() -> impl IntoView {
         let raw_owned = raw.clone();
         spawn_local(async move {
             let avoid = load_session_seen_urls();
-            // One batch: current post + queue fillers (no CDN probe storm).
-            let result = load_media_batch(&raw_owned, &avoid, 1 + PRELOAD_TARGET).await;
+            // FAST tier first — minimal latency for what you see now.
+            let result = load_media_batch(
+                &raw_owned,
+                &avoid,
+                1 + PRELOAD_TARGET,
+                LoadTier::Fast,
+            )
+            .await;
 
             if load_gen.get_untracked() != gen {
                 return;
@@ -345,7 +393,6 @@ pub fn App() -> impl IntoView {
                     }
                 }
                 Ok(_) | Err(_) => {
-                    // Single fallback fetch once.
                     match load_random_image(&raw_owned, &avoid).await {
                         Ok((img, window)) => {
                             if load_gen.get_untracked() != gen {
@@ -366,10 +413,12 @@ pub fn App() -> impl IntoView {
                 return;
             }
             loading.set(false);
-            if image.get_untracked().is_some()
-                && preload_queue.with_untracked(|q| q.len()) < PRELOAD_TARGET
-            {
-                fill_preload_queue();
+            // Background in parallel: top up queue (fast) + upgrade quality (reverify + probe).
+            if image.get_untracked().is_some() {
+                if preload_queue.with_untracked(|q| q.len()) < PRELOAD_TARGET {
+                    fill_preload_queue();
+                }
+                refine_queue_quality();
             }
         });
     };
