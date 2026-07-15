@@ -54,19 +54,35 @@ impl std::fmt::Display for DiscoverError {
     }
 }
 
+/// Minimum names we want in a pool before we stop expanding discovery.
+const MIN_CATALOG: usize = 60;
+/// Arctic random time windows per discovery pass (variety >> one "recent" page).
+const DISCOVER_WINDOWS: usize = 4;
+/// How far back we sample posts (days).
+const DISCOVER_LOOKBACK_DAYS: u64 = 180;
+
 #[cfg(target_arch = "wasm32")]
 fn deck_key(pool: SubredditPool) -> &'static str {
+    // v2: multi-window discovery + used-set (old v1 caches were tiny + repetitive).
     match pool {
-        SubredditPool::Sfw => "rust-game-2048-live-deck-sfw-v1",
-        SubredditPool::NsfwOnly => "rust-game-2048-live-deck-nsfw-v1",
+        SubredditPool::Sfw => "rust-game-2048-live-deck-sfw-v2",
+        SubredditPool::NsfwOnly => "rust-game-2048-live-deck-nsfw-v2",
     }
 }
 
 #[cfg(target_arch = "wasm32")]
 fn cache_key(pool: SubredditPool) -> &'static str {
     match pool {
-        SubredditPool::Sfw => "rust-game-2048-live-cache-sfw-v1",
-        SubredditPool::NsfwOnly => "rust-game-2048-live-cache-nsfw-v1",
+        SubredditPool::Sfw => "rust-game-2048-live-cache-sfw-v2",
+        SubredditPool::NsfwOnly => "rust-game-2048-live-cache-nsfw-v2",
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn used_key(pool: SubredditPool) -> &'static str {
+    match pool {
+        SubredditPool::Sfw => "rust-game-2048-live-used-sfw-v2",
+        SubredditPool::NsfwOnly => "rust-game-2048-live-used-nsfw-v2",
     }
 }
 
@@ -260,11 +276,24 @@ fn ingest_value_posts(map: &mut HashMap<String, SubredditEntry>, want_nsfw: bool
     }
 }
 
-/// Persist a catalog + shuffled deck for one pool (session only).
+/// Merge `incoming` into existing session catalog (grow, never shrink variety).
 #[cfg(target_arch = "wasm32")]
-fn persist_pool(pool: SubredditPool, list: &[SubredditEntry]) {
+fn merge_and_persist_catalog(pool: SubredditPool, incoming: &[SubredditEntry]) -> Vec<SubredditEntry> {
+    let mut map: HashMap<String, SubredditEntry> = HashMap::new();
+    for e in load_cached_catalog(pool) {
+        map.insert(e.name.to_ascii_lowercase(), e);
+    }
+    for e in incoming {
+        let key = e.name.to_ascii_lowercase();
+        map.entry(key).and_modify(|old| {
+            if old.blurb.is_empty() && !e.blurb.is_empty() {
+                old.blurb = e.blurb.clone();
+            }
+        }).or_insert_with(|| e.clone());
+    }
+    let list: Vec<_> = map.into_values().collect();
     if list.is_empty() {
-        return;
+        return list;
     }
     if let Ok(raw) = serde_json::to_string(
         &list
@@ -274,45 +303,121 @@ fn persist_pool(pool: SubredditPool, list: &[SubredditEntry]) {
     ) {
         session_set(cache_key(pool), &raw);
     }
-    let mut deck: Vec<String> = list.iter().map(|e| e.name.clone()).collect();
-    fisher_yates(&mut deck);
-    if let Ok(raw) = serde_json::to_string(&deck) {
-        session_set(deck_key(pool), &raw);
+    list
+}
+
+#[cfg(target_arch = "wasm32")]
+fn load_used(pool: SubredditPool) -> HashSet<String> {
+    session_get(used_key(pool))
+        .and_then(|raw| serde_json::from_str::<Vec<String>>(&raw).ok())
+        .map(|v| v.into_iter().map(|s| s.to_ascii_lowercase()).collect())
+        .unwrap_or_default()
+}
+
+#[cfg(target_arch = "wasm32")]
+fn save_used(pool: SubredditPool, used: &HashSet<String>) {
+    let mut list: Vec<String> = used.iter().cloned().collect();
+    list.sort();
+    // Cap so storage stays reasonable in a very long session.
+    if list.len() > 800 {
+        list.truncate(800);
+    }
+    if let Ok(raw) = serde_json::to_string(&list) {
+        session_set(used_key(pool), &raw);
     }
 }
 
-/// Discover **both** SFW and NSFW from **two** listing requests total (Pullpush + Arctic).
-/// Builds two session decks so SFW/NSFW clicks don't wait on network.
+#[cfg(target_arch = "wasm32")]
+fn mark_used(pool: SubredditPool, name: &str) {
+    let mut used = load_used(pool);
+    used.insert(name.to_ascii_lowercase());
+    save_used(pool, &used);
+}
+
+#[cfg(target_arch = "wasm32")]
+fn clear_used(pool: SubredditPool) {
+    session_set(used_key(pool), "[]");
+}
+
+#[cfg(target_arch = "wasm32")]
+fn iso_utc(secs: u64) -> String {
+    // Arctic accepts ISO-8601; build without chrono.
+    let day = secs / 86_400;
+    let rem = secs % 86_400;
+    let hour = rem / 3600;
+    let min = (rem % 3600) / 60;
+    let sec = rem % 60;
+    // Days since Unix epoch → year/month/day (civil from days algorithm).
+    let (y, m, d) = civil_from_days(day as i64);
+    format!("{y:04}-{m:02}-{d:02}T{hour:02}:{min:02}:{sec:02}")
+}
+
+/// Howard Hinnant civil_from_days (UTC).
+#[cfg(target_arch = "wasm32")]
+fn civil_from_days(z: i64) -> (i32, u32, u32) {
+    let z = z + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = (z - era * 146_097) as u64;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
+    let y = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    (y as i32, m as u32, d as u32)
+}
+
+/// Discover communities by sampling **random time windows** of global posts.
+/// One "top week" + one "recent" page always returns the same mega-subs — that was the
+/// repeat bug. Random windows yield hundreds of distinct image-friendly names.
 #[cfg(target_arch = "wasm32")]
 async fn discover_both_pools() -> Result<(Vec<SubredditEntry>, Vec<SubredditEntry>), DiscoverError> {
     let mut sfw: HashMap<String, SubredditEntry> = HashMap::new();
     let mut nsfw: HashMap<String, SubredditEntry> = HashMap::new();
 
-    // 1) Pullpush: one top-by-score week sample (popular image-friendly subs).
-    let now = (js_sys::Date::now() / 1000.0) as u64;
-    let since = now.saturating_sub(7 * 86_400);
-    let pp = format!(
-        "https://api.pullpush.io/reddit/search/submission/?sort=desc&sort_type=score&size=100&since={since}"
-    );
-    if let Ok(v) = fetch_json(&pp).await {
-        ingest_value_posts(&mut sfw, false, &v);
-        ingest_value_posts(&mut nsfw, true, &v);
+    // Seed maps from existing catalog so we grow across discovery passes.
+    for e in load_cached_catalog(SubredditPool::Sfw) {
+        sfw.insert(e.name.to_ascii_lowercase(), e);
+    }
+    for e in load_cached_catalog(SubredditPool::NsfwOnly) {
+        nsfw.insert(e.name.to_ascii_lowercase(), e);
     }
 
-    // 2) Arctic: one global recent page (good NSFW density + more names).
+    let now = (js_sys::Date::now() / 1000.0) as u64;
+    let lookback = DISCOVER_LOOKBACK_DAYS * 86_400;
+
+    // 1) Several random Arctic windows across the lookback range.
+    for _ in 0..DISCOVER_WINDOWS {
+        // Random end in [now-lookback+2h, now-1h], 2-hour slice.
+        let span = lookback.saturating_sub(3 * 3600).max(3600);
+        let end = now.saturating_sub(3600 + fastrand::u64(0..=span));
+        let start = end.saturating_sub(2 * 3600);
+        let after = iso_utc(start);
+        let before = iso_utc(end);
+        let url = format!(
+            "https://arctic-shift.photon-reddit.com/api/posts/search?limit=100&sort=desc&after={after}&before={before}"
+        );
+        if let Ok(v) = fetch_json(&url).await {
+            ingest_value_posts(&mut sfw, false, &v);
+            ingest_value_posts(&mut nsfw, true, &v);
+        }
+    }
+
+    // 2) One "latest" page for fresh names (still merges, doesn't replace).
     let arctic = "https://arctic-shift.photon-reddit.com/api/posts/search?limit=100&sort=desc";
     if let Ok(v) = fetch_json(arctic).await {
         ingest_value_posts(&mut sfw, false, &v);
         ingest_value_posts(&mut nsfw, true, &v);
     }
 
-    // Optional third call only if one side is empty.
-    if sfw.is_empty() || nsfw.is_empty() {
-        let since30 = now.saturating_sub(30 * 86_400);
-        let pp2 = format!(
-            "https://api.pullpush.io/reddit/search/submission/?sort=desc&sort_type=score&size=100&since={since30}"
+    // 3) Pullpush only if a pool is still thin (top-score is repetitive — avoid as primary).
+    if sfw.len() < MIN_CATALOG / 2 || nsfw.len() < MIN_CATALOG / 2 {
+        let since = now.saturating_sub(30 * 86_400);
+        let pp = format!(
+            "https://api.pullpush.io/reddit/search/submission/?sort=desc&sort_type=score&size=100&since={since}"
         );
-        if let Ok(v) = fetch_json(&pp2).await {
+        if let Ok(v) = fetch_json(&pp).await {
             ingest_value_posts(&mut sfw, false, &v);
             ingest_value_posts(&mut nsfw, true, &v);
         }
@@ -324,19 +429,46 @@ async fn discover_both_pools() -> Result<(Vec<SubredditEntry>, Vec<SubredditEntr
 
     let sfw_list: Vec<_> = sfw.into_values().collect();
     let nsfw_list: Vec<_> = nsfw.into_values().collect();
-    persist_pool(SubredditPool::Sfw, &sfw_list);
-    persist_pool(SubredditPool::NsfwOnly, &nsfw_list);
+    // Persist catalogs; rebuild decks only from **unused** names so we don't
+    // immediately reshuffle names the user already saw this session.
+    let sfw_list = merge_and_persist_catalog(SubredditPool::Sfw, &sfw_list);
+    let nsfw_list = merge_and_persist_catalog(SubredditPool::NsfwOnly, &nsfw_list);
+    rebuild_deck_from_unused(SubredditPool::Sfw, &sfw_list);
+    rebuild_deck_from_unused(SubredditPool::NsfwOnly, &nsfw_list);
     Ok((sfw_list, nsfw_list))
+}
+
+/// Build a shuffled deck of catalog names not yet used this session.
+/// If every name was used, clear the used-set and reshuffle the full catalog.
+#[cfg(target_arch = "wasm32")]
+fn rebuild_deck_from_unused(pool: SubredditPool, catalog: &[SubredditEntry]) {
+    if catalog.is_empty() {
+        return;
+    }
+    let used = load_used(pool);
+    let mut fresh: Vec<String> = catalog
+        .iter()
+        .filter(|e| !used.contains(&e.name.to_ascii_lowercase()))
+        .map(|e| e.name.clone())
+        .collect();
+    if fresh.is_empty() {
+        clear_used(pool);
+        fresh = catalog.iter().map(|e| e.name.clone()).collect();
+    }
+    fisher_yates(&mut fresh);
+    if let Ok(raw) = serde_json::to_string(&fresh) {
+        session_set(deck_key(pool), &raw);
+    }
 }
 
 /// Warm both community decks once per session (call at app start).
 pub async fn warm_community_caches() -> Result<(), DiscoverError> {
     #[cfg(target_arch = "wasm32")]
     {
-        // Already warm?
-        let sfw_ok = !load_cached_catalog(SubredditPool::Sfw).is_empty();
-        let nsfw_ok = !load_cached_catalog(SubredditPool::NsfwOnly).is_empty();
-        if sfw_ok && nsfw_ok {
+        let sfw_n = load_cached_catalog(SubredditPool::Sfw).len();
+        let nsfw_n = load_cached_catalog(SubredditPool::NsfwOnly).len();
+        // Re-expand if either pool is still small (old sessions / thin first pass).
+        if sfw_n >= MIN_CATALOG && nsfw_n >= MIN_CATALOG {
             return Ok(());
         }
         discover_both_pools().await?;
@@ -349,8 +481,7 @@ pub async fn warm_community_caches() -> Result<(), DiscoverError> {
 }
 
 #[cfg(target_arch = "wasm32")]
-async fn discover_live(pool: SubredditPool) -> Result<Vec<SubredditEntry>, DiscoverError> {
-    // Prefer shared dual discovery (1–3 requests total for both pools).
+async fn expand_catalog(pool: SubredditPool) -> Result<Vec<SubredditEntry>, DiscoverError> {
     let (sfw, nsfw) = discover_both_pools().await?;
     Ok(match pool {
         SubredditPool::Sfw => sfw,
@@ -359,7 +490,7 @@ async fn discover_live(pool: SubredditPool) -> Result<Vec<SubredditEntry>, Disco
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-async fn discover_live(_pool: SubredditPool) -> Result<Vec<SubredditEntry>, DiscoverError> {
+async fn expand_catalog(_pool: SubredditPool) -> Result<Vec<SubredditEntry>, DiscoverError> {
     Err(DiscoverError::Empty)
 }
 
@@ -393,7 +524,7 @@ fn load_cached_catalog(_pool: SubredditPool) -> Vec<SubredditEntry> {
     Vec::new()
 }
 
-/// Pick a random live-discovered sub. Builds/refills a session shuffle deck.
+/// Pick a random live-discovered sub. Session shuffle deck + used-set (no immediate repeats).
 pub async fn pick_random_subreddit_live(
     pool: SubredditPool,
     avoid: Option<&str>,
@@ -411,33 +542,54 @@ pub async fn pick_random_subreddit_live(
     let mut deck: Vec<String> = Vec::new();
 
     let mut catalog = load_cached_catalog(pool);
-    if catalog.is_empty() {
-        catalog = discover_live(pool).await?;
+    if catalog.len() < MIN_CATALOG / 3 {
+        // First pick / thin cache: expand with multi-window discovery.
+        if let Ok(more) = expand_catalog(pool).await {
+            catalog = more;
+            #[cfg(target_arch = "wasm32")]
+            {
+                deck = session_get(deck_key(pool))
+                    .and_then(|raw| serde_json::from_str(&raw).ok())
+                    .unwrap_or_default();
+            }
+        } else if catalog.is_empty() {
+            return Err(DiscoverError::Empty);
+        }
     }
 
-    // Rebuild deck if empty or names not in catalog.
     let cat_names: HashSet<String> = catalog
         .iter()
         .map(|e| e.name.to_ascii_lowercase())
         .collect();
     deck.retain(|n| cat_names.contains(&n.to_ascii_lowercase()));
 
+    // Drop names already used this session (deck may be stale after used-set updates).
+    #[cfg(target_arch = "wasm32")]
+    {
+        let used = load_used(pool);
+        deck.retain(|n| !used.contains(&n.to_ascii_lowercase()));
+    }
+
     if deck.is_empty() {
-        // Refresh catalog periodically for more variety.
-        if catalog.len() < 15 {
-            if let Ok(more) = discover_live(pool).await {
-                catalog = more;
-            }
+        // Expand catalog for more variety, then rebuild from unused names.
+        if let Ok(more) = expand_catalog(pool).await {
+            catalog = more;
         }
-        deck = catalog.iter().map(|e| e.name.clone()).collect();
-        fisher_yates(&mut deck);
         #[cfg(target_arch = "wasm32")]
-        if let Ok(raw) = serde_json::to_string(&deck) {
-            session_set(deck_key(pool), &raw);
+        {
+            rebuild_deck_from_unused(pool, &catalog);
+            deck = session_get(deck_key(pool))
+                .and_then(|raw| serde_json::from_str(&raw).ok())
+                .unwrap_or_default();
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            deck = catalog.iter().map(|e| e.name.clone()).collect();
+            fisher_yates(&mut deck);
         }
     }
 
-    // Draw next non-avoid name.
+    // Draw next non-avoid name (deck front is already shuffled).
     let mut choice: Option<String> = None;
     let mut i = 0;
     while i < deck.len() {
@@ -454,7 +606,23 @@ pub async fn pick_random_subreddit_live(
         break;
     }
     if choice.is_none() {
-        choice = deck.pop();
+        // Only the avoided current sub left — allow it as last resort after used clear.
+        #[cfg(target_arch = "wasm32")]
+        {
+            clear_used(pool);
+            rebuild_deck_from_unused(pool, &catalog);
+            deck = session_get(deck_key(pool))
+                .and_then(|raw| serde_json::from_str(&raw).ok())
+                .unwrap_or_default();
+            if let Some(a) = &avoid_l {
+                deck.retain(|n| n.to_ascii_lowercase() != *a);
+            }
+            choice = deck.pop();
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            choice = deck.pop();
+        }
     }
 
     #[cfg(target_arch = "wasm32")]
@@ -463,6 +631,10 @@ pub async fn pick_random_subreddit_live(
     }
 
     let name = choice.ok_or(DiscoverError::Empty)?;
+
+    #[cfg(target_arch = "wasm32")]
+    mark_used(pool, &name);
+
     let mut entry = catalog
         .into_iter()
         .find(|e| e.name.eq_ignore_ascii_case(&name))
@@ -506,5 +678,15 @@ mod tests {
             false,
             false
         ));
+    }
+
+    #[test]
+    fn fisher_yates_preserves_membership() {
+        let mut names: Vec<String> = (0..50).map(|i| format!("sub{i}")).collect();
+        let set: HashSet<_> = names.iter().cloned().collect();
+        fisher_yates(&mut names);
+        let after: HashSet<_> = names.iter().cloned().collect();
+        assert_eq!(set, after);
+        assert_eq!(names.len(), 50);
     }
 }
