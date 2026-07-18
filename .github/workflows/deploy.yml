@@ -14,11 +14,14 @@ concurrency:
   group: pages
   cancel-in-progress: true
 
+env:
+  CARGO_TERM_COLOR: always
+
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4.2.2
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -26,15 +29,30 @@ jobs:
           targets: wasm32-unknown-unknown
 
       - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@v2.7.8
+        with:
+          cache-targets: true
+          prefix-key: rust-game-2048
 
-      - name: Test
+      - name: Test (native)
         run: cargo test
+
+      - name: Check wasm target
+        run: cargo check --target wasm32-unknown-unknown
 
       - name: Install Trunk
         uses: jetli/trunk-action@v0.5.0
         with:
-          version: latest
+          # Pin for reproducible Pages builds (avoid "latest" drift).
+          version: v0.21.14
+
+      - name: Cache Trunk
+        uses: actions/cache@v4.2.3
+        with:
+          path: ~/.cache/trunk
+          key: ${{ runner.os }}-trunk-0.21.14-${{ hashFiles('Trunk.toml', 'Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-trunk-0.21.14-
 
       - name: Build
         run: |
@@ -42,7 +60,7 @@ jobs:
           trunk build --release
 
       - name: Upload Pages artifact
-        uses: actions/upload-pages-artifact@v3
+        uses: actions/upload-pages-artifact@v3.0.1
         with:
           path: dist
 
@@ -55,4 +73,4 @@ jobs:
     steps:
       - name: Deploy to GitHub Pages
         id: deployment
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@v4.0.5

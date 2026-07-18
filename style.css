@@ -297,6 +297,11 @@ body {
   cursor: wait;
 }
 
+.btn-discover-busy {
+  opacity: 0.85;
+  cursor: progress;
+}
+
 /* Meta: errors left (rare) · subreddit description right — no empty row */
 .chrome-row-meta {
   gap: 10px;
@@ -1363,5 +1368,122 @@ video.lightbox-img {
 @keyframes spin {
   to {
     transform: rotate(360deg);
+  }
+}
+
+/* Session gallery — unlocked posts this tab */
+.gallery-panel {
+  margin-top: 12px;
+  flex: 0 0 auto;
+  max-height: 220px;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.gallery-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.gallery-meta {
+  margin: 0;
+  font-size: 12px;
+  opacity: 0.75;
+}
+
+.gallery-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  overflow-y: auto;
+  min-height: 0;
+  flex: 1;
+}
+
+.gallery-item {
+  margin: 0;
+}
+
+.gallery-card {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  text-align: left;
+  border: 0;
+  border-radius: 8px;
+  padding: 6px 8px;
+  background: rgba(0, 0, 0, 0.12);
+  color: inherit;
+  cursor: pointer;
+  transition: background 0.15s ease;
+}
+
+.gallery-card:hover {
+  background: rgba(0, 0, 0, 0.2);
+}
+
+.gallery-thumb-wrap {
+  position: relative;
+  width: 48px;
+  height: 48px;
+  flex: 0 0 48px;
+  border-radius: 6px;
+  overflow: hidden;
+  background: #111;
+}
+
+.gallery-thumb {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.gallery-idx {
+  position: absolute;
+  left: 2px;
+  bottom: 2px;
+  font-size: 10px;
+  font-weight: 700;
+  background: rgba(0, 0, 0, 0.55);
+  color: #fff;
+  padding: 0 4px;
+  border-radius: 3px;
+}
+
+.gallery-card-copy {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.gallery-card-title {
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.gallery-card-sub {
+  font-size: 11px;
+  opacity: 0.7;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+@media (max-width: 720px) {
+  .gallery-panel {
+    max-height: 160px;
   }
 }

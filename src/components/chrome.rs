@@ -60,6 +60,8 @@ pub fn Chrome(
         on_play.run(());
     };
 
+    let discovering = RwSignal::new(false);
+
     let on_random_pool = move |p: SubredditPool| {
         // Always allow skip: cancel whatever is loading for the previous sub.
         on_sub_edit.run(());
@@ -68,13 +70,20 @@ pub fn Chrome(
         let current = subreddit.get_untracked();
         let gen = desc_gen.get_untracked() + 1;
         desc_gen.set(gen);
-        description.set("Finding a community…".into());
+        discovering.set(true);
+        // Visible even when the r/ field is still empty (first-run SFW/NSFW).
+        description.set(match p {
+            SubredditPool::Sfw => "Finding a random SFW community…".into(),
+            SubredditPool::NsfwOnly => "Finding a random NSFW community…".into(),
+        });
         spawn_local(async move {
-            match pick_random_subreddit_live(p, Some(current.as_str())).await {
+            let result = pick_random_subreddit_live(p, Some(current.as_str())).await;
+            if desc_gen.get_untracked() != gen {
+                discovering.set(false);
+                return;
+            }
+            match result {
                 Ok(entry) => {
-                    if desc_gen.get_untracked() != gen {
-                        return;
-                    }
                     subreddit.set(entry.name.clone());
                     save_subreddit(&entry.name);
                     // Real community description only (never a post title from discovery).
@@ -84,12 +93,12 @@ pub fn Chrome(
                     } else {
                         description.set(entry.blurb);
                     }
+                    discovering.set(false);
                     on_play.run(());
                 }
                 Err(e) => {
-                    if desc_gen.get_untracked() == gen {
-                        description.set(e.to_string());
-                    }
+                    description.set(e.to_string());
+                    discovering.set(false);
                 }
             }
         });
@@ -206,19 +215,43 @@ pub fn Chrome(
                     </button>
                     <button
                         type="button"
-                        class="btn btn-discover btn-discover-sfw"
-                        title="Surprise me with a random SFW subreddit (cancels current fetch)"
+                        class=move || {
+                            if discovering.get() && pool.get() == SubredditPool::Sfw {
+                                "btn btn-discover btn-discover-sfw btn-discover-busy"
+                            } else {
+                                "btn btn-discover btn-discover-sfw"
+                            }
+                        }
+                        title="Surprise me with a random SFW subreddit (works before Play; cancels current fetch)"
                         on:click=move |_| on_random_pool(SubredditPool::Sfw)
                     >
-                        "SFW"
+                        {move || {
+                            if discovering.get() && pool.get() == SubredditPool::Sfw {
+                                "…"
+                            } else {
+                                "SFW"
+                            }
+                        }}
                     </button>
                     <button
                         type="button"
-                        class="btn btn-discover btn-discover-nsfw"
-                        title="Surprise me with a random NSFW (18+) subreddit (cancels current fetch)"
+                        class=move || {
+                            if discovering.get() && pool.get() == SubredditPool::NsfwOnly {
+                                "btn btn-discover btn-discover-nsfw btn-discover-busy"
+                            } else {
+                                "btn btn-discover btn-discover-nsfw"
+                            }
+                        }
+                        title="Surprise me with a random NSFW (18+) subreddit (works before Play; cancels current fetch)"
                         on:click=move |_| on_random_pool(SubredditPool::NsfwOnly)
                     >
-                        "NSFW"
+                        {move || {
+                            if discovering.get() && pool.get() == SubredditPool::NsfwOnly {
+                                "…"
+                            } else {
+                                "NSFW"
+                            }
+                        }}
                     </button>
                 </div>
             </div>
@@ -237,8 +270,9 @@ pub fn Chrome(
                             let name = subreddit.get();
                             let name = name.trim().to_string();
                             let desc = description.get();
+                            // Before a sub is chosen (first-run SFW/NSFW), show discovery status alone.
                             if name.is_empty() {
-                                String::new()
+                                desc
                             } else if desc.is_empty() {
                                 format!("r/{name}")
                             } else {

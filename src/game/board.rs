@@ -1,4 +1,5 @@
 use super::move_logic::{slide_tile_line, LineTile, SlidTile};
+use serde::{Deserialize, Serialize};
 
 /// Move direction on the 4×4 board.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -10,7 +11,7 @@ pub enum Direction {
 }
 
 /// High-level game status for overlays.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum GameStatus {
     Playing,
     /// Just reached the win target for the first time; show win overlay.
@@ -20,7 +21,7 @@ pub enum GameStatus {
 }
 
 /// A single tile with stable identity for CSS transitions.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Tile {
     pub id: u64,
     pub value: u32,
@@ -30,6 +31,17 @@ pub struct Tile {
     pub is_new: bool,
     /// Just created by a merge — play pop animation.
     pub is_merged: bool,
+}
+
+/// Serializable board for session restore (localStorage / sessionStorage).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BoardSnapshot {
+    pub tiles: Vec<Tile>,
+    pub next_id: u64,
+    pub score: u32,
+    pub status: GameStatus,
+    pub win_tile: u32,
+    pub won_once: bool,
 }
 
 /// Classic 4×4 2048 board with identity-tracked tiles.
@@ -121,6 +133,63 @@ impl Board {
     #[cfg(test)]
     pub fn won_once(&self) -> bool {
         self.won_once
+    }
+
+    /// Snapshot for persistence (animation flags cleared).
+    pub fn to_snapshot(&self) -> BoardSnapshot {
+        let mut tiles = self.tiles.clone();
+        for t in &mut tiles {
+            t.is_new = false;
+            t.is_merged = false;
+        }
+        BoardSnapshot {
+            tiles,
+            next_id: self.next_id,
+            score: self.score,
+            status: self.status,
+            win_tile: self.win_tile,
+            won_once: self.won_once,
+        }
+    }
+
+    /// Restore a saved board (validates tile geometry).
+    pub fn from_snapshot(snap: BoardSnapshot) -> Option<Self> {
+        if snap.win_tile < 2 || snap.tiles.len() > 16 {
+            return None;
+        }
+        let mut occupied = [[false; 4]; 4];
+        let mut next_id = snap.next_id.max(1);
+        for t in &snap.tiles {
+            if t.row > 3 || t.col > 3 || t.value == 0 || !t.value.is_power_of_two() {
+                return None;
+            }
+            if occupied[t.row as usize][t.col as usize] {
+                return None;
+            }
+            occupied[t.row as usize][t.col as usize] = true;
+            next_id = next_id.max(t.id.saturating_add(1));
+        }
+        let mut board = Self {
+            tiles: snap.tiles,
+            next_id,
+            score: snap.score,
+            status: snap.status,
+            win_tile: snap.win_tile,
+            won_once: snap.won_once,
+        };
+        for t in &mut board.tiles {
+            t.is_new = false;
+            t.is_merged = false;
+        }
+        // Reconcile status with board contents.
+        if board.status != GameStatus::Won {
+            if !board.has_moves() {
+                board.status = GameStatus::Over;
+            } else if board.status != GameStatus::Over {
+                board.status = GameStatus::Playing;
+            }
+        }
+        Some(board)
     }
 
     /// After win overlay, continue playing without re-showing win.
@@ -376,6 +445,24 @@ mod tests {
         assert_eq!(b.tiles().len(), 2);
         assert_eq!(b.score(), 0);
         assert_eq!(b.status(), GameStatus::Playing);
+    }
+
+    #[test]
+    fn snapshot_roundtrip() {
+        let mut b = Board::from_cells([
+            [2, 4, 0, 0],
+            [0, 0, 8, 0],
+            [0, 0, 0, 0],
+            [0, 0, 0, 16],
+        ]);
+        b.try_move_with_spawn(Direction::Left, &mut rng());
+        let snap = b.to_snapshot();
+        let raw = serde_json::to_string(&snap).unwrap();
+        let back: BoardSnapshot = serde_json::from_str(&raw).unwrap();
+        let restored = Board::from_snapshot(back).expect("restore");
+        assert_eq!(restored.score(), b.score());
+        assert_eq!(restored.cells(), b.cells());
+        assert_eq!(restored.win_tile(), b.win_tile());
     }
 
     #[test]

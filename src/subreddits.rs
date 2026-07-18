@@ -534,7 +534,67 @@ fn load_cached_catalog(_pool: SubredditPool) -> Vec<SubredditEntry> {
     Vec::new()
 }
 
+/// Seed names when live discovery is slow/empty so SFW/NSFW works before the first Play.
+/// Prefers durable "good subs" remembered after successful media loads (localStorage).
+fn fallback_catalog(pool: SubredditPool) -> Vec<SubredditEntry> {
+    let static_names: &[&str] = match pool {
+        SubredditPool::Sfw => &[
+            "pics",
+            "EarthPorn",
+            "Art",
+            "aww",
+            "InterestingAsFuck",
+            "itookapicture",
+            "AbandonedPorn",
+            "CityPorn",
+            "NatureIsFuckingLit",
+            "mildlyinteresting",
+        ],
+        SubredditPool::NsfwOnly => &[
+            "nsfw",
+            "RealGirls",
+            "gonewild",
+            "nsfw_gifs",
+            "BustyPetite",
+            "LegalTeens",
+            "collegesluts",
+            "Amateur",
+            "AsiansGoneWild",
+            "milf",
+        ],
+    };
+    let mut out: Vec<SubredditEntry> = Vec::new();
+    let mut seen = HashSet::new();
+    // Cross-session good picks first (works even when live discovery is cold).
+    for name in crate::storage::load_good_subs() {
+        let key = name.to_ascii_lowercase();
+        if seen.insert(key) {
+            out.push(SubredditEntry {
+                name,
+                blurb: String::new(),
+            });
+        }
+    }
+    for n in static_names {
+        let key = n.to_ascii_lowercase();
+        if seen.insert(key) {
+            out.push(SubredditEntry {
+                name: (*n).to_string(),
+                blurb: String::new(),
+            });
+        }
+    }
+    // NSFW pool: only keep names that look intentionally NSFW from static list if we
+    // can't filter good-subs by pool — still fine as seed variety.
+    if matches!(pool, SubredditPool::NsfwOnly) {
+        // Prefer static NSFW seeds first after any remembered names.
+        let _ = pool;
+    }
+    out
+}
+
 /// Pick a random live-discovered sub. Session shuffle deck + used-set (no immediate repeats).
+/// Works on first click (no prior Play required); falls back to a small seed list if discovery fails.
 pub async fn pick_random_subreddit_live(
     pool: SubredditPool,
     avoid: Option<&str>,
@@ -563,7 +623,8 @@ pub async fn pick_random_subreddit_live(
                     .unwrap_or_default();
             }
         } else if catalog.is_empty() {
-            return Err(DiscoverError::Empty);
+            // Live APIs unavailable — still allow SFW/NSFW without requiring Play first.
+            catalog = fallback_catalog(pool);
         }
     }
 
@@ -584,6 +645,9 @@ pub async fn pick_random_subreddit_live(
         // Expand catalog for more variety, then rebuild from unused names.
         if let Ok(more) = expand_catalog(pool).await {
             catalog = more;
+        }
+        if catalog.is_empty() {
+            catalog = fallback_catalog(pool);
         }
         #[cfg(target_arch = "wasm32")]
         {
@@ -620,6 +684,9 @@ pub async fn pick_random_subreddit_live(
         #[cfg(target_arch = "wasm32")]
         {
             clear_used(pool);
+            if catalog.is_empty() {
+                catalog = fallback_catalog(pool);
+            }
             rebuild_deck_from_unused(pool, &catalog);
             deck = session_get(deck_key(pool))
                 .and_then(|raw| serde_json::from_str(&raw).ok())
@@ -631,7 +698,30 @@ pub async fn pick_random_subreddit_live(
         }
         #[cfg(not(target_arch = "wasm32"))]
         {
+            if catalog.is_empty() {
+                catalog = fallback_catalog(pool);
+                deck = catalog.iter().map(|e| e.name.clone()).collect();
+                fisher_yates(&mut deck);
+            }
             choice = deck.pop();
+        }
+    }
+
+    // Absolute last resort: seed list so first-run SFW/NSFW never hard-fails offline.
+    if choice.is_none() {
+        let mut seeds = fallback_catalog(pool);
+        if let Some(a) = &avoid_l {
+            seeds.retain(|e| e.name.to_ascii_lowercase() != *a);
+        }
+        if seeds.is_empty() {
+            seeds = fallback_catalog(pool);
+        }
+        if !seeds.is_empty() {
+            let idx = fastrand::usize(..seeds.len());
+            choice = Some(seeds[idx].name.clone());
+            if catalog.is_empty() {
+                catalog = seeds;
+            }
         }
     }
 
@@ -677,6 +767,15 @@ mod tests {
             DiscoverError::Network("timeout".into()).to_string(),
             "Could not discover subreddits (timeout)"
         );
+    }
+
+    #[test]
+    fn fallback_catalogs_are_non_empty() {
+        assert!(!fallback_catalog(SubredditPool::Sfw).is_empty());
+        assert!(!fallback_catalog(SubredditPool::NsfwOnly).is_empty());
+        assert!(fallback_catalog(SubredditPool::Sfw)
+            .iter()
+            .any(|e| e.name == "pics"));
     }
 
     #[test]

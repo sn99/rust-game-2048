@@ -1,5 +1,5 @@
 use crate::components::{
-    BoardView, Chrome, ImagePanel, Lightbox, Overlay, RevealBackground,
+    BoardView, Chrome, Gallery, ImagePanel, Lightbox, Overlay, RevealBackground,
 };
 use crate::difficulty::clamp_target;
 use crate::game::{Board, Direction};
@@ -11,11 +11,13 @@ use crate::reddit::{
     abort_active_fetches, load_media_batch, load_random_image, media_seen_in_session,
     normalize_subreddit, warm_media_cache, LoadTier, RedditMedia,
 };
-use crate::subreddits::warm_community_caches;
 use crate::storage::{
-    load_best, load_goal, load_session_seen_urls, load_subreddit, load_subreddit_pool,
-    push_recent_media_urls, save_best, save_goal, save_subreddit,
+    clear_game_session, load_best, load_gallery, load_game_session, load_goal,
+    load_session_seen_urls, load_subreddit, load_subreddit_pool, push_gallery_entry,
+    push_recent_media_urls, remember_good_sub, save_best, save_game_session, save_goal,
+    save_subreddit, GalleryEntry, GameSession,
 };
+use crate::subreddits::warm_community_caches;
 use leptos::prelude::*;
 use wasm_bindgen::closure::Closure;
 use wasm_bindgen::JsCast;
@@ -23,39 +25,60 @@ use wasm_bindgen_futures::spawn_local;
 use web_sys::TouchEvent;
 
 const SLIDE_MS: i32 = 100;
+/// Prefetch depth — lower = less concurrent network work.
+const PRELOAD_TARGET: usize = 2;
 
 #[component]
 pub fn App() -> impl IntoView {
     let rng = StoredValue::new(fastrand::Rng::new());
     let initial_goal = load_goal();
-    let board = RwSignal::new(
-        rng.try_update_value(|r| Board::new(r, initial_goal))
-            .expect("rng"),
-    );
+
+    // --- Session restore (refresh in the same tab) ---
+    let restored = load_game_session().and_then(|s| {
+        let board = Board::from_snapshot(s.board.clone())?;
+        Some((
+            board,
+            s.reveal_from,
+            s.reveal_to,
+            s.media,
+            s.slide_index,
+        ))
+    });
+    let (initial_board, initial_reveal_from, initial_reveal_to, initial_media, initial_slide) =
+        if let Some(parts) = restored {
+            parts
+        } else {
+            let b = rng
+                .try_update_value(|r| Board::new(r, initial_goal))
+                .expect("rng");
+            (b, 2u32, initial_goal, None, 0usize)
+        };
+
+    let board = RwSignal::new(initial_board);
     let best = RwSignal::new(load_best());
     let touch = RwSignal::new(TouchTracker::default());
     let animating = RwSignal::new(false);
     let goal = RwSignal::new(initial_goal);
-    // Unblur range: 0% at reveal_from, 100% at reveal_to.
-    let reveal_from = RwSignal::new(2u32);
-    let reveal_to = RwSignal::new(initial_goal);
+    let reveal_from = RwSignal::new(initial_reveal_from);
+    let reveal_to = RwSignal::new(initial_reveal_to);
 
     let subreddit = RwSignal::new(load_subreddit());
     let subreddit_pool = RwSignal::new(load_subreddit_pool());
-    let image = RwSignal::new(None::<RedditMedia>);
-    // Queue of ready next posts (target depth 3) for instant Next / Next game.
+    let image = RwSignal::new(initial_media);
     let preload_queue = RwSignal::new(Vec::<(RedditMedia, &'static str)>::new());
     let preload_busy = RwSignal::new(false);
-    // Bumped to cancel in-flight prefetch workers.
     let preload_gen = RwSignal::new(0u32);
-    // Bumped to cancel in-flight foreground fetches (user switched sub mid-load).
     let load_gen = RwSignal::new(0u32);
-    const PRELOAD_TARGET: usize = 3;
-    let slide_index = RwSignal::new(0usize);
+    // Quality-refine generation — cancelled when user moves on (Play/Next/sub change).
+    let quality_gen = RwSignal::new(0u32);
+    let slide_index = RwSignal::new(initial_slide);
     let load_status = RwSignal::new(String::new());
     let loading = RwSignal::new(false);
     let lightbox_open = RwSignal::new(false);
     let lightbox_sharp = RwSignal::new(false);
+    let gallery = RwSignal::new(load_gallery());
+    // Track which media ids we already added to the gallery this unlock.
+    let gallery_armed = RwSignal::new(None::<String>);
 
     let score = Signal::derive(move || board.get().score());
     let status = Signal::derive(move || board.get().status());
@@ -93,6 +116,47 @@ pub fn App() -> impl IntoView {
         let i = slide_index.get().min(list.len() - 1);
         Some(list[i].clone())
     });
+    let gallery_sig = Signal::derive(move || gallery.get());
+
+    let persist_session = move || {
+        let Some(snap) = board.with_untracked(|b| Some(b.to_snapshot())) else {
+            return;
+        };
+        let session = GameSession {
+            board: snap,
+            reveal_from: reveal_from.get_untracked(),
+            reveal_to: reveal_to.get_untracked(),
+            media: image.get_untracked(),
+            slide_index: slide_index.get_untracked(),
+            goal: goal.get_untracked(),
+        };
+        save_game_session(&session);
+    };
+
+    let maybe_record_gallery = move || {
+        if !post_unlocked.get_untracked() {
+            return;
+        }
+        let Some(media) = image.get_untracked() else {
+            return;
+        };
+        let id = if media.id.is_empty() {
+            media.primary_url().to_string()
+        } else {
+            media.id.clone()
+        };
+        if gallery_armed.get_untracked().as_deref() == Some(id.as_str()) {
+            return;
+        }
+        gallery_armed.set(Some(id));
+        let entry = GalleryEntry {
+            media,
+            goal: goal.get_untracked(),
+            max_tile: max_tile.get_untracked(),
+        };
+        push_gallery_entry(entry.clone());
+        gallery.set(load_gallery());
+    };
 
     let finish_move = move || {
         board.update(|b| {
@@ -106,10 +170,11 @@ pub fn App() -> impl IntoView {
             });
         });
         animating.set(false);
+        maybe_record_gallery();
+        persist_session();
     };
 
     let apply_move = Callback::new(move |dir: Direction| {
-        // Only block moves during the first media wait (no image on board yet).
         let first_load_lock = loading.get_untracked() && image.get_untracked().is_none();
         if animating.get_untracked() || lightbox_open.get_untracked() || first_load_lock {
             return;
@@ -145,23 +210,24 @@ pub fn App() -> impl IntoView {
         });
         reveal_from.set(2);
         reveal_to.set(t);
+        gallery_armed.set(None);
+        persist_session();
     });
-
-    // Filled after on_load_image is defined — see bottom wiring.
 
     let apply_loaded_media = move |img: RedditMedia, window: &'static str, reset_board: bool| {
         save_subreddit(&img.subreddit);
+        remember_good_sub(&img.subreddit);
         subreddit.set(img.subreddit.clone());
         push_recent_media_urls(img.items.iter().map(|i| i.url.clone()));
         warm_media_cache(&img);
 
-        // Clear chrome errors; post title lives only in the reveal panel.
         let _ = window;
         load_status.set(String::new());
         slide_index.set(0);
         image.set(Some(img));
         lightbox_sharp.set(false);
         animating.set(false);
+        gallery_armed.set(None);
 
         let g = goal.get_untracked();
         if reset_board {
@@ -171,20 +237,19 @@ pub fn App() -> impl IntoView {
             reveal_from.set(2);
             reveal_to.set(g);
         } else {
-            // Keep board; new post unblurs over the next doubling of the highest tile.
             let cur = board.with_untracked(|b| b.max_tile().max(2));
             reveal_from.set(cur);
             reveal_to.set(cur.saturating_mul(2).max(g));
         }
+        persist_session();
     };
 
-    // Abort in-flight foreground + background fetches (user switched away).
     let cancel_in_flight = move || {
         load_gen.update(|g| *g = g.wrapping_add(1));
         preload_gen.update(|g| *g = g.wrapping_add(1));
+        quality_gen.update(|g| *g = g.wrapping_add(1));
         preload_busy.set(false);
         loading.set(false);
-        // Stop browser HTTP work (AbortController) so Network tab clears abandoned calls.
         abort_active_fetches();
     };
 
@@ -195,7 +260,6 @@ pub fn App() -> impl IntoView {
         }
     }
 
-    // Fast fill: metadata-only posts so Next is ready soon.
     let fill_preload_queue = move || {
         if loading.get_untracked() || preload_busy.get_untracked() {
             return;
@@ -235,9 +299,7 @@ pub fn App() -> impl IntoView {
                 }
             });
 
-            if let Ok(batch) =
-                load_media_batch(&raw, &avoid, need, LoadTier::Fast).await
-            {
+            if let Ok(batch) = load_media_batch(&raw, &avoid, need, LoadTier::Fast).await {
                 if preload_gen.get_untracked() != gen {
                     preload_busy.set(false);
                     return;
@@ -267,14 +329,15 @@ pub fn App() -> impl IntoView {
         });
     };
 
-    // Background: re-verify + CDN-probe better posts and replace the queue when ready.
-    // Does not block Play/Next — only upgrades what you'll get later.
+    // Quality refine — cancelled when quality_gen or preload_gen bumps (user moved on).
     let refine_queue_quality = move || {
         let raw = subreddit.get_untracked();
         if raw.trim().is_empty() {
             return;
         }
-        let gen = preload_gen.get_untracked();
+        let pgen = preload_gen.get_untracked();
+        let qgen = quality_gen.get_untracked().wrapping_add(1);
+        quality_gen.set(qgen);
         spawn_local(async move {
             let mut avoid = load_session_seen_urls();
             if let Some(cur) = image.get_untracked() {
@@ -282,13 +345,13 @@ pub fn App() -> impl IntoView {
                     avoid.push(it.url.clone());
                 }
             }
-            // Quality path: ids re-check + live media probe for up to PRELOAD_TARGET posts.
             let Ok(batch) =
                 load_media_batch(&raw, &avoid, PRELOAD_TARGET, LoadTier::Quality).await
             else {
                 return;
             };
-            if preload_gen.get_untracked() != gen {
+            // Drop result if user switched sub, started a new load, or superseded refine.
+            if quality_gen.get_untracked() != qgen || preload_gen.get_untracked() != pgen {
                 return;
             }
             let still = subreddit.get_untracked();
@@ -301,15 +364,12 @@ pub fn App() -> impl IntoView {
             for (m, _) in &batch {
                 warm_media_cache(m);
             }
-            // Upgrade queue: verified posts replace the fast/metadata-only ones.
             preload_queue.set(batch);
         });
     };
 
-    // Load next media. Supersedes any in-flight fetch (user can switch mid-load).
     let load_media = move || {
         let mut raw = subreddit.get_untracked();
-        // Empty field → friendly default so Play works out of the box.
         if raw.trim().is_empty() {
             raw = "pics".to_string();
             subreddit.set(raw.clone());
@@ -318,7 +378,6 @@ pub fn App() -> impl IntoView {
         let want_sub = normalize_subreddit(&raw).unwrap_or_else(|| raw.trim().to_string());
         let avoid = load_session_seen_urls();
 
-        // Instant path: pop from ready queue (same sub).
         let mut queue = preload_queue.get_untracked();
         let mut taken = None;
         queue.retain(|(img, window)| {
@@ -337,7 +396,6 @@ pub fn App() -> impl IntoView {
                 true
             }
         });
-        // Drop wrong-sub leftovers when user switched communities.
         queue.retain(|(img, _)| {
             let pre_sub =
                 normalize_subreddit(&img.subreddit).unwrap_or_else(|| img.subreddit.clone());
@@ -346,24 +404,23 @@ pub fn App() -> impl IntoView {
         preload_queue.set(queue);
 
         if let Some((img, window)) = taken {
-            // Instant path from queue (fast-tier and/or quality-refined).
             apply_loaded_media(img, window, true);
             load_gen.update(|g| *g = g.wrapping_add(1));
+            quality_gen.update(|g| *g = g.wrapping_add(1));
             loading.set(false);
             fill_preload_queue();
             refine_queue_quality();
             return;
         }
 
-        // Supersede previous work; clear queue only when starting a full network load.
         let gen = load_gen.get_untracked().wrapping_add(1);
         load_gen.set(gen);
         preload_gen.update(|g| *g = g.wrapping_add(1));
+        quality_gen.update(|g| *g = g.wrapping_add(1));
         preload_busy.set(false);
         preload_queue.set(Vec::new());
         abort_active_fetches();
 
-        // Only hard-block the board on the *first* media load (no image yet).
         let first_load = image.get_untracked().is_none();
         if first_load {
             loading.set(true);
@@ -372,7 +429,6 @@ pub fn App() -> impl IntoView {
         let raw_owned = raw.clone();
         spawn_local(async move {
             let avoid = load_session_seen_urls();
-            // FAST tier first — minimal latency for what you see now.
             let result = load_media_batch(
                 &raw_owned,
                 &avoid,
@@ -398,28 +454,25 @@ pub fn App() -> impl IntoView {
                         });
                     }
                 }
-                Ok(_) | Err(_) => {
-                    match load_random_image(&raw_owned, &avoid).await {
-                        Ok((img, window)) => {
-                            if load_gen.get_untracked() != gen {
-                                return;
-                            }
-                            apply_loaded_media(img, window, true);
+                Ok(_) | Err(_) => match load_random_image(&raw_owned, &avoid).await {
+                    Ok((img, window)) => {
+                        if load_gen.get_untracked() != gen {
+                            return;
                         }
-                        Err(e) => {
-                            if load_gen.get_untracked() == gen {
-                                load_status.set(e.to_string());
-                            }
+                        apply_loaded_media(img, window, true);
+                    }
+                    Err(e) => {
+                        if load_gen.get_untracked() == gen {
+                            load_status.set(e.to_string());
                         }
                     }
-                }
+                },
             }
 
             if load_gen.get_untracked() != gen {
                 return;
             }
             loading.set(false);
-            // Background in parallel: top up queue (fast) + upgrade quality (reverify + probe).
             if image.get_untracked().is_some() {
                 if preload_queue.with_untracked(|q| q.len()) < PRELOAD_TARGET {
                     fill_preload_queue();
@@ -429,26 +482,26 @@ pub fn App() -> impl IntoView {
         });
     };
 
-    // Play / Next / Next game: new board + next post for the current sub.
     let on_play = Callback::new(move |_: ()| {
         load_media();
     });
 
-    // User is editing the sub field or skipping — abandon the fetch in progress.
     let on_sub_edit = Callback::new(move |_: ()| {
         cancel_in_flight();
         preload_queue.set(Vec::new());
         load_status.set(String::new());
     });
 
-    // Warm SFW/NSFW decks + start post prefetch if a sub is already saved.
     Effect::new(move |_| {
         spawn_local(async {
             let _ = warm_community_caches().await;
         });
-        // Kick queue fill ASAP when we already know the sub (no wait for first Play).
         if !subreddit.get_untracked().trim().is_empty() {
             fill_preload_queue();
+        }
+        // If we restored an already-unlocked post, seed gallery arming.
+        if post_unlocked.get_untracked() {
+            maybe_record_gallery();
         }
     });
 
@@ -459,6 +512,8 @@ pub fn App() -> impl IntoView {
         slide_index.set(0);
         lightbox_open.set(false);
         load_status.set(String::new());
+        clear_game_session();
+        gallery_armed.set(None);
     });
 
     let on_open_full = Callback::new(move |_: ()| {
@@ -466,9 +521,24 @@ pub fn App() -> impl IntoView {
         lightbox_open.set(true);
     });
 
+    // Gallery: swap media only — keep board & reveal progress.
+    let on_gallery_select = Callback::new(move |entry: GalleryEntry| {
+        save_subreddit(&entry.media.subreddit);
+        subreddit.set(entry.media.subreddit.clone());
+        warm_media_cache(&entry.media);
+        slide_index.set(0);
+        image.set(Some(entry.media));
+        lightbox_sharp.set(false);
+        gallery_armed.set(None);
+        // If already past goal, re-arm so we don't re-insert; mark armed after check.
+        if post_unlocked.get_untracked() {
+            maybe_record_gallery();
+        }
+        persist_session();
+    });
+
     use_keyboard(apply_move);
 
-    // Block play only while waiting for the *first* media (no board image yet).
     let play_locked = Signal::derive(move || loading.get() && image.get().is_none());
 
     let on_touch_start = move |ev: TouchEvent| {
@@ -578,6 +648,7 @@ pub fn App() -> impl IntoView {
                         on_open_full=on_open_full
                         on_clear=on_clear_image
                     />
+                    <Gallery entries=gallery_sig on_select=on_gallery_select />
                 </aside>
             </div>
 

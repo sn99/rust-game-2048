@@ -25,6 +25,8 @@ After enabling GitHub Pages (Actions source):
   - Background + side panel unblur from 0% → 100% as your max tile approaches the goal
   - Reddit post link unlocks when you hit the goal tile
   - Prefetches the next few posts so **Next** / **Next game** stay snappy
+  - **Session restore**: refresh keeps board, score, media, and reveal progress (same tab)
+  - **Gallery**: unlocked posts this session appear under the reveal panel (click to re-view)
   - Media via [Arctic Shift](https://arctic-shift.photon-reddit.com) / [Pullpush](https://pullpush.io) archives (Reddit blocks direct browser API use)
 
 ## Develop
@@ -61,7 +63,7 @@ The workflow runs `cargo test`, builds with Trunk, and deploys the `dist/` folde
 | `src/game/` | Pure board / move logic (unit tested) |
 | `src/difficulty.rs` | Goal levels and labels |
 | `src/progress.rs` | Reveal / blur progress |
-| `src/reddit.rs` | Media fetch, normalize, filters |
+| `src/reddit/` | Media types, normalize, parse, network/probe |
 | `src/subreddits.rs` | Live SFW/NSFW discovery |
 | `src/components/` | Leptos UI |
 | `src/input.rs` | Keyboard + swipe |
