@@ -8,14 +8,14 @@ use crate::input::{
 };
 use crate::progress::reveal_progress_range;
 use crate::reddit::{
-    abort_active_fetches, load_media_batch, load_random_image, media_seen_in_session,
-    normalize_subreddit, warm_media_cache, LoadTier, RedditMedia,
+    abort_active_fetches, filter_still_available_media, load_media_batch, load_random_image,
+    media_seen_in_session, normalize_subreddit, warm_media_cache, LoadTier, RedditMedia,
 };
 use crate::storage::{
     clear_game_session, load_best, load_gallery, load_game_session, load_goal,
     load_session_seen_urls, load_subreddit, load_subreddit_pool, push_gallery_entry,
-    push_recent_media_urls, remember_good_sub, save_best, save_game_session, save_goal,
-    save_subreddit, GalleryEntry, GameSession,
+    push_recent_media_urls, remember_good_sub, save_best, save_gallery, save_game_session,
+    save_goal, save_subreddit, GalleryEntry, GameSession,
 };
 use crate::subreddits::warm_community_caches;
 use leptos::prelude::*;
@@ -492,6 +492,54 @@ pub fn App() -> impl IntoView {
         load_status.set(String::new());
     });
 
+    // Re-check Unlocked for deleted posts (startup + each open).
+    let prune_gallery = move || {
+        spawn_local(async move {
+            let entries = load_gallery();
+            if entries.is_empty() {
+                return;
+            }
+            let media: Vec<RedditMedia> = entries.iter().map(|e| e.media.clone()).collect();
+            let live = filter_still_available_media(media).await;
+            let live_keys: std::collections::HashSet<String> = live
+                .iter()
+                .map(|m| {
+                    if m.id.is_empty() {
+                        m.primary_url().to_string()
+                    } else {
+                        m.id.clone()
+                    }
+                })
+                .collect();
+            let mut pruned = Vec::new();
+            for e in entries {
+                let key = if e.media.id.is_empty() {
+                    e.media.primary_url().to_string()
+                } else {
+                    e.media.id.clone()
+                };
+                if !live_keys.contains(&key) {
+                    continue;
+                }
+                let media = live
+                    .iter()
+                    .find(|m| {
+                        (!e.media.id.is_empty() && m.id == e.media.id)
+                            || m.primary_url() == e.media.primary_url()
+                    })
+                    .cloned()
+                    .unwrap_or(e.media);
+                pruned.push(GalleryEntry {
+                    media,
+                    goal: e.goal,
+                    max_tile: e.max_tile,
+                });
+            }
+            save_gallery(&pruned);
+            gallery.set(pruned);
+        });
+    };
+
     Effect::new(move |_| {
         spawn_local(async {
             let _ = warm_community_caches().await;
@@ -503,6 +551,23 @@ pub fn App() -> impl IntoView {
         if post_unlocked.get_untracked() {
             maybe_record_gallery();
         }
+
+        // Drop deleted posts from Unlocked + clear restored media if it is gone.
+        prune_gallery();
+        spawn_local(async move {
+            if let Some(cur) = image.get_untracked() {
+                let kept = filter_still_available_media(vec![cur]).await;
+                if kept.is_empty() {
+                    image.set(None);
+                    slide_index.set(0);
+                    clear_game_session();
+                    load_status.set("Previous post was removed — load another.".into());
+                } else if let Some(live) = kept.into_iter().next() {
+                    image.set(Some(live));
+                    persist_session();
+                }
+            }
+        });
     });
 
     let on_clear_image = Callback::new(move |_: ()| {
@@ -521,22 +586,41 @@ pub fn App() -> impl IntoView {
         lightbox_open.set(true);
     });
 
+    let on_gallery_open = Callback::new(move |_: ()| {
+        prune_gallery();
+    });
+
     // Gallery: swap media only — keep board, reveal progress, and Unlocked order.
+    // Verifies the post is still live; if deleted, remove it from Unlocked instead.
     let on_gallery_select = Callback::new(move |entry: GalleryEntry| {
-        save_subreddit(&entry.media.subreddit);
-        subreddit.set(entry.media.subreddit.clone());
-        warm_media_cache(&entry.media);
-        slide_index.set(0);
-        let arm_id = if entry.media.id.is_empty() {
-            entry.media.primary_url().to_string()
-        } else {
-            entry.media.id.clone()
-        };
-        image.set(Some(entry.media));
-        lightbox_sharp.set(false);
-        // Already in the gallery — do not re-push (would reshuffle).
-        gallery_armed.set(Some(arm_id));
-        persist_session();
+        spawn_local(async move {
+            let kept = filter_still_available_media(vec![entry.media.clone()]).await;
+            let Some(live) = kept.into_iter().next() else {
+                // Deleted — strip from Unlocked without reshuffling the rest.
+                let mut list = load_gallery();
+                list.retain(|e| {
+                    e.media.id != entry.media.id
+                        && e.media.primary_url() != entry.media.primary_url()
+                });
+                save_gallery(&list);
+                gallery.set(list);
+                load_status.set("That post was removed — dropped from Unlocked.".into());
+                return;
+            };
+            save_subreddit(&live.subreddit);
+            subreddit.set(live.subreddit.clone());
+            warm_media_cache(&live);
+            slide_index.set(0);
+            let arm_id = if live.id.is_empty() {
+                live.primary_url().to_string()
+            } else {
+                live.id.clone()
+            };
+            image.set(Some(live));
+            lightbox_sharp.set(false);
+            gallery_armed.set(Some(arm_id));
+            persist_session();
+        });
     });
 
     use_keyboard(apply_move);
@@ -650,7 +734,11 @@ pub fn App() -> impl IntoView {
                         on_open_full=on_open_full
                         on_clear=on_clear_image
                     />
-                    <Gallery entries=gallery_sig on_select=on_gallery_select />
+                    <Gallery
+                        entries=gallery_sig
+                        on_select=on_gallery_select
+                        on_open=on_gallery_open
+                    />
                 </aside>
             </div>
 

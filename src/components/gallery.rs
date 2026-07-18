@@ -8,6 +8,8 @@ pub fn Gallery(
     entries: Signal<Vec<GalleryEntry>>,
     /// When set, open this gallery item as the active media (does not reset board).
     on_select: Callback<GalleryEntry>,
+    /// Fired when the dropdown opens — parent re-checks for deleted posts.
+    on_open: Callback<()>,
 ) -> impl IntoView {
     // Collapsed by default — full side column stays with Reveal.
     let open = RwSignal::new(false);
@@ -29,7 +31,14 @@ pub fn Gallery(
                     class="gallery-toggle"
                     aria-expanded=move || open.get().to_string()
                     aria-controls="gallery-dropdown"
-                    on:click=move |_| open.update(|v| *v = !*v)
+                    on:click=move |_| {
+                        open.update(|v| {
+                            *v = !*v;
+                            if *v {
+                                on_open.run(());
+                            }
+                        });
+                    }
                 >
                     <span class="gallery-toggle-label">
                         <span class="gallery-toggle-title">"Unlocked"</span>

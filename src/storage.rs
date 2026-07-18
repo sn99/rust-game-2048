@@ -221,6 +221,13 @@ pub fn push_gallery_entry(entry: GalleryEntry) {
     }
     list.insert(0, entry);
     list.truncate(GALLERY_MAX);
+    save_gallery(&list);
+}
+
+/// Replace the whole gallery (e.g. after pruning deleted posts). Preserves caller order.
+pub fn save_gallery(entries: &[GalleryEntry]) {
+    let mut list = entries.to_vec();
+    list.truncate(GALLERY_MAX);
     if let Ok(raw) = serde_json::to_string(&list) {
         ss_set(GALLERY_KEY, &raw);
     }

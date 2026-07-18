@@ -5,8 +5,7 @@ use std::collections::HashSet;
 
 #[cfg(target_arch = "wasm32")]
 use super::parse::{
-    extract_images, json_post_id, json_post_is_known_dead, json_post_is_public, json_post_score,
-    url_looks_deleted,
+    extract_images, json_post_id, json_post_is_public, json_post_score, url_looks_deleted,
 };
 use super::normalize::normalize_subreddit;
 #[cfg(target_arch = "wasm32")]
@@ -372,22 +371,12 @@ async fn try_pick_batch_from_posts(
     max_n: usize,
     tier: LoadTier,
 ) -> Result<Vec<RedditMedia>, RedditError> {
+    // Strict: only posts still robot-indexable (never pad with unknowns — those are often deleted).
     let mut public: Vec<serde_json::Value> = posts
         .iter()
         .filter(|p| json_post_is_public(p))
         .cloned()
         .collect();
-    if public.len() < max_n {
-        for p in &posts {
-            if json_post_is_known_dead(p) || json_post_id(p).is_none() {
-                continue;
-            }
-            if public.iter().any(|q| json_post_id(q) == json_post_id(p)) {
-                continue;
-            }
-            public.push(p.clone());
-        }
-    }
     if public.is_empty() {
         return Err(RedditError::NoImages);
     }
@@ -409,18 +398,21 @@ async fn try_pick_batch_from_posts(
         return Err(RedditError::NoImages);
     }
 
-    // Quality: one batch archive re-check for the candidate pool.
-    if tier == LoadTier::Quality {
+    // Archive re-check for every tier so deleted posts never ship to the UI.
+    {
         let ids: Vec<String> = top.iter().filter_map(json_post_id).collect();
-        let public_ids = reverify_public_ids(&ids).await;
-        top.retain(|p| {
-            json_post_id(p)
-                .map(|id| public_ids.contains(&id))
-                .unwrap_or(false)
-        });
-        if top.is_empty() {
-            return Err(RedditError::NoImages);
+        let (public_ids, ok) = reverify_public_ids(&ids).await;
+        if ok {
+            top.retain(|p| {
+                json_post_id(p)
+                    .map(|id| public_ids.contains(&id))
+                    .unwrap_or(false)
+            });
+            if top.is_empty() {
+                return Err(RedditError::NoImages);
+            }
         }
+        // If reverify network failed entirely, keep metadata-public listing (best effort).
     }
 
     let mut media_list = posts_json_to_media(top, sub)?;
@@ -441,7 +433,7 @@ async fn try_pick_batch_from_posts(
 
     match tier {
         LoadTier::Fast => {
-            // Zero extra network — return immediately.
+            // Metadata + id reverify only (no CDN probes) for snappy Play/Next.
             let out: Vec<RedditMedia> = media_list.into_iter().take(max_n).collect();
             if out.is_empty() {
                 Err(RedditError::NoImages)
@@ -477,20 +469,19 @@ async fn try_pick_batch_from_posts(
     }
 }
 
-/// Batch re-fetch posts by id; return only ids that are still public on Reddit.
+/// Batch re-fetch posts by id; return still-public ids and whether any request succeeded.
 #[cfg(target_arch = "wasm32")]
-async fn reverify_public_ids(ids: &[String]) -> HashSet<String> {
+async fn reverify_public_ids(ids: &[String]) -> (HashSet<String>, bool) {
     let mut out = HashSet::new();
     if ids.is_empty() {
-        return out;
+        return (out, true);
     }
-    // One signal for this re-verify wave (shares ACTIVE_ABORT with listing if same wave).
     let signal = ACTIVE_ABORT.with(|c| c.borrow().as_ref().map(|ctrl| ctrl.signal()));
+    let mut any_ok = false;
     for chunk in ids.chunks(25) {
         let joined = chunk.join(",");
         let url = format!("https://arctic-shift.photon-reddit.com/api/posts/ids?ids={joined}");
         let Ok(text) = fetch_text_with_opts(&url, 500.0, signal.as_ref()).await else {
-            // Conservative: if re-check fails, accept none of this chunk.
             continue;
         };
         let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) else {
@@ -499,15 +490,58 @@ async fn reverify_public_ids(ids: &[String]) -> HashSet<String> {
         let Some(arr) = v.get("data").and_then(|d| d.as_array()) else {
             continue;
         };
+        any_ok = true;
         for p in arr {
+            // Only keep still-public; missing from response = gone/deleted.
             if json_post_is_public(p) {
                 if let Some(id) = json_post_id(p) {
                     out.insert(id);
                 }
             }
         }
+        // Ids not present in the response are treated as deleted (not added to `out`).
+        let _ = chunk;
     }
-    out
+    (out, any_ok)
+}
+
+/// Drop posts that are no longer public or whose media CDN is dead.
+/// Used for Unlocked gallery cleanup and restored media checks.
+pub async fn filter_still_available_media(media: Vec<RedditMedia>) -> Vec<RedditMedia> {
+    #[cfg(target_arch = "wasm32")]
+    {
+        if media.is_empty() {
+            return media;
+        }
+        let ids: Vec<String> = media
+            .iter()
+            .map(|m| m.id.clone())
+            .filter(|id| !id.is_empty())
+            .collect();
+        let (public_ids, reverify_ok) = reverify_public_ids(&ids).await;
+
+        let mut kept = Vec::with_capacity(media.len());
+        for m in media {
+            let mut m = m;
+            m.items.retain(|it| !url_looks_deleted(&it.url));
+            if m.items.is_empty() {
+                continue;
+            }
+            // Archive says gone / removed → drop (only when reverify succeeded).
+            if reverify_ok && !m.id.is_empty() && !public_ids.contains(&m.id) {
+                continue;
+            }
+            // CDN probe: catch deleted files that still look “public” in the archive.
+            if let Some(live) = filter_live_media(m).await {
+                kept.push(live);
+            }
+        }
+        kept
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        media
+    }
 }
 
 /// Keep only media that still loads (filters Reddit-deleted files).
