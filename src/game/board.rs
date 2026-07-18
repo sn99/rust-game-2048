@@ -61,19 +61,6 @@ impl Board {
         board
     }
 
-    /// Empty board (for tests). No random tiles.
-    #[cfg(test)]
-    pub fn empty() -> Self {
-        Self {
-            tiles: Vec::new(),
-            next_id: 1,
-            score: 0,
-            status: GameStatus::Playing,
-            win_tile: 2048,
-            won_once: false,
-        }
-    }
-
     #[cfg(test)]
     pub fn from_cells(cells: [[u32; 4]; 4]) -> Self {
         Self::from_cells_with_goal(cells, 2048)
@@ -122,13 +109,9 @@ impl Board {
         self.tiles.iter().map(|t| t.value).max().unwrap_or(0)
     }
 
+    #[cfg(test)]
     pub fn win_tile(&self) -> u32 {
         self.win_tile
-    }
-
-    /// Change goal without reshuffling (used when starting a new game at a new level).
-    pub fn set_win_tile(&mut self, win_tile: u32) {
-        self.win_tile = win_tile.max(2);
     }
 
     pub fn status(&self) -> GameStatus {
@@ -141,6 +124,7 @@ impl Board {
     }
 
     /// After win overlay, continue playing without re-showing win.
+    #[cfg(test)]
     pub fn continue_after_win(&mut self) {
         if self.status == GameStatus::Won {
             self.status = GameStatus::Playing;
@@ -152,6 +136,7 @@ impl Board {
     }
 
     /// Reset for New Game (caller keeps best score separately).
+    #[cfg(test)]
     pub fn reset(&mut self, rng: &mut fastrand::Rng) {
         let goal = self.win_tile;
         *self = Self::new(rng, goal);

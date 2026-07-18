@@ -33,18 +33,7 @@ impl RedditMedia {
     pub fn primary_url(&self) -> &str {
         self.items.first().map(|m| m.url.as_str()).unwrap_or("")
     }
-
-    pub fn is_multi(&self) -> bool {
-        self.items.len() > 1
-    }
-
-    pub fn has_video(&self) -> bool {
-        self.items.iter().any(|m| m.kind == MediaKind::Video)
-    }
 }
-
-/// Back-compat alias used in older call sites/docs.
-pub type RedditImage = RedditMedia;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RedditError {
@@ -163,8 +152,6 @@ struct PostData {
     /// false ≈ removed from public listing / deleted for robots.
     /// Must be true for us to link the post (CDN may still serve deleted posts’ files).
     is_robot_indexable: Option<bool>,
-    #[allow(dead_code)]
-    over_18: Option<bool>,
     post_hint: Option<String>,
     is_video: Option<bool>,
     is_gallery: Option<bool>,
@@ -188,12 +175,6 @@ struct MediaWrapper {
 #[derive(Debug, Deserialize)]
 struct RedditVideo {
     fallback_url: Option<String>,
-    #[allow(dead_code)]
-    hls_url: Option<String>,
-    #[allow(dead_code)]
-    dash_url: Option<String>,
-    #[allow(dead_code)]
-    is_gif: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -649,23 +630,6 @@ fn decode_url(url: &str) -> String {
     url.replace("&amp;", "&")
 }
 
-#[allow(dead_code)]
-pub fn pick_random_image(images: &[RedditMedia], avoid_urls: &[String]) -> Option<RedditMedia> {
-    if images.is_empty() {
-        return None;
-    }
-    let fresh: Vec<&RedditMedia> = images
-        .iter()
-        .filter(|img| !avoid_urls.iter().any(|u| u == img.primary_url()))
-        .collect();
-    let pool = if fresh.is_empty() {
-        images.iter().collect::<Vec<_>>()
-    } else {
-        fresh
-    };
-    Some(pool[fastrand::usize(..pool.len())].clone())
-}
-
 /// Warm browser cache for images (best-effort).
 #[cfg(target_arch = "wasm32")]
 pub fn warm_media_cache(media: &RedditMedia) {
@@ -703,11 +667,6 @@ pub fn warm_media_cache(media: &RedditMedia) {
 pub fn warm_media_cache(_media: &RedditMedia) {}
 
 #[cfg(target_arch = "wasm32")]
-fn now_secs() -> u64 {
-    (js_sys::Date::now() / 1000.0) as u64
-}
-
-#[cfg(target_arch = "wasm32")]
 fn now_ms() -> f64 {
     js_sys::Date::now()
 }
@@ -739,6 +698,7 @@ fn iso_utc_from_unix(secs: f64) -> String {
 }
 
 /// How many highest-scoring public posts we randomize among (true “top” pool).
+#[cfg(target_arch = "wasm32")]
 const TOP_POOL_SIZE: usize = 40;
 
 #[cfg(target_arch = "wasm32")]
@@ -921,33 +881,7 @@ async fn fetch_arctic_window(
     Ok(all)
 }
 
-/// Pullpush score-sorted (true top-of-window). Often 429 — use sparingly.
 #[cfg(target_arch = "wasm32")]
-async fn fetch_pullpush_window(
-    subreddit: &str,
-    since_days: Option<i64>,
-) -> Result<Vec<serde_json::Value>, RedditError> {
-    let now = now_secs();
-    let mut url = format!(
-        "https://api.pullpush.io/reddit/search/submission/?subreddit={subreddit}&sort=desc&sort_type=score&size=100"
-    );
-    if let Some(days) = since_days {
-        let since = now.saturating_sub((days as u64).saturating_mul(86_400));
-        url.push_str(&format!("&since={since}"));
-    }
-    let text = fetch_text_with_opts(&url, 3_500.0, None).await?;
-    let v: serde_json::Value =
-        serde_json::from_str(&text).map_err(|e| RedditError::Parse(e.to_string()))?;
-    let mut arr = v
-        .get("data")
-        .and_then(|d| d.as_array())
-        .cloned()
-        .unwrap_or_default();
-    // Drop known-dead; missing robot field is OK until Arctic ids re-verify.
-    arr.retain(|p| !json_post_is_known_dead(p));
-    Ok(arr)
-}
-
 fn posts_json_to_media(posts: Vec<serde_json::Value>, subreddit: &str) -> Result<Vec<RedditMedia>, RedditError> {
     // Reuse extract_images by wrapping as { "data": posts }
     let wrapped = serde_json::json!({ "data": posts });
@@ -1040,6 +974,7 @@ async fn load_media_batch_for_sub(
 
 /// Pick up to `max_n` posts from a listing.
 /// Fast: metadata only. Quality: re-verify ids + CDN-probe only the posts we keep.
+#[cfg(target_arch = "wasm32")]
 async fn try_pick_batch_from_posts(
     posts: Vec<serde_json::Value>,
     sub: &str,
@@ -1186,33 +1121,9 @@ async fn reverify_public_ids(ids: &[String]) -> HashSet<String> {
     out
 }
 
-#[cfg(not(target_arch = "wasm32"))]
-async fn reverify_public_ids(ids: &[String]) -> HashSet<String> {
-    ids.iter().cloned().collect()
-}
-
-/// Re-fetch one post by id; true only if still public on the archive.
-/// Used before accepting media so we don't link deleted Reddit posts (CDN may still serve files).
-pub async fn post_is_still_public(id: &str) -> bool {
-    post_still_public(id).await
-}
-
-#[cfg(target_arch = "wasm32")]
-async fn post_still_public(id: &str) -> bool {
-    if id.is_empty() {
-        return false;
-    }
-    let set = reverify_public_ids(&[id.to_string()]).await;
-    set.contains(id)
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-async fn post_still_public(id: &str) -> bool {
-    !id.is_empty()
-}
-
 /// Keep only media that still loads (filters Reddit-deleted files).
-pub async fn filter_live_media(media: RedditMedia) -> Option<RedditMedia> {
+#[cfg(target_arch = "wasm32")]
+async fn filter_live_media(media: RedditMedia) -> Option<RedditMedia> {
     let mut live = Vec::with_capacity(media.items.len());
     for item in media.items {
         if url_looks_deleted(&item.url) {
@@ -1243,31 +1154,6 @@ async fn media_item_is_available(item: &MediaItem) -> bool {
         MediaKind::Image => probe_image(&item.url).await,
         MediaKind::Video => probe_video(&item.url).await,
     }
-}
-
-/// Returns Some(true/false) if we got a readable HTTP status; None if CORS blocked.
-#[cfg(target_arch = "wasm32")]
-async fn http_url_ok(url: &str) -> Option<bool> {
-    match gloo_net::http::Request::get(url).send().await {
-        Ok(resp) => {
-            let status = resp.status();
-            // 2xx/3xx ok; 404/410 gone; 403 often deleted/forbidden media
-            if status == 404 || status == 410 || status == 451 {
-                return Some(false);
-            }
-            if (200..400).contains(&status) {
-                return Some(true);
-            }
-            // Other statuses (403 etc.) — still try element probe (CDN quirks)
-            None
-        }
-        Err(_) => None,
-    }
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-async fn media_item_is_available(_item: &MediaItem) -> bool {
-    true
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -1646,6 +1532,24 @@ mod tests {
         }"#;
         let err = extract_images(json, "pics").unwrap_err();
         assert!(matches!(err, RedditError::NoImages));
+    }
+
+    #[test]
+    fn json_post_id_and_score() {
+        let with_id = serde_json::json!({"id": "t3_abc123", "score": 42});
+        assert_eq!(json_post_id(&with_id).as_deref(), Some("abc123"));
+        assert_eq!(json_post_score(&with_id), 42);
+
+        let from_permalink = serde_json::json!({
+            "permalink": "/r/pics/comments/xyz99/title/",
+            "score": 7.5
+        });
+        assert_eq!(json_post_id(&from_permalink).as_deref(), Some("xyz99"));
+        assert_eq!(json_post_score(&from_permalink), 7);
+
+        let empty = serde_json::json!({});
+        assert_eq!(json_post_id(&empty), None);
+        assert_eq!(json_post_score(&empty), 0);
     }
 
 }

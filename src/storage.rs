@@ -171,15 +171,6 @@ pub fn mark_session_seen_urls(urls: &[String]) {
     }
 }
 
-// Back-compat names used by app during transition
-pub fn load_recent_image_urls() -> Vec<String> {
-    load_session_seen_urls()
-}
-
-pub fn push_recent_image_url(url: &str) {
-    mark_session_seen_urls(&[url.to_string()]);
-}
-
 pub fn push_recent_media_urls(urls: impl IntoIterator<Item = String>) {
     let v: Vec<String> = urls.into_iter().collect();
     mark_session_seen_urls(&v);

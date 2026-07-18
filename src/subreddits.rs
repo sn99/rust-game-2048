@@ -1,7 +1,9 @@
 //! Live subreddit discovery (no hardcoded catalog).
 //! Sources: Pullpush top posts + Arctic Shift posts, with session cache.
 
-use std::collections::{HashMap, HashSet};
+#[cfg(target_arch = "wasm32")]
+use std::collections::HashMap;
+use std::collections::HashSet;
 
 /// Which pool the random finder draws from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -25,6 +27,7 @@ impl SubredditPool {
         }
     }
 
+    #[cfg(test)]
     pub fn wants_nsfw(self) -> bool {
         matches!(self, Self::NsfwOnly)
     }
@@ -57,8 +60,10 @@ impl std::fmt::Display for DiscoverError {
 /// Minimum names we want in a pool before we stop expanding discovery.
 const MIN_CATALOG: usize = 60;
 /// Arctic random time windows per discovery pass (variety >> one "recent" page).
+#[cfg(target_arch = "wasm32")]
 const DISCOVER_WINDOWS: usize = 4;
 /// How far back we sample posts (days).
+#[cfg(target_arch = "wasm32")]
 const DISCOVER_LOOKBACK_DAYS: u64 = 180;
 
 #[cfg(target_arch = "wasm32")]
@@ -125,6 +130,7 @@ fn looks_like_image_post(url: &str, post_hint: Option<&str>, is_gallery: bool, i
         || u.contains("/gallery/")
 }
 
+#[cfg(target_arch = "wasm32")]
 fn ingest_post(
     map: &mut HashMap<String, SubredditEntry>,
     want_nsfw: bool,
@@ -664,7 +670,13 @@ mod tests {
     fn pool_parse() {
         assert!(!SubredditPool::Sfw.wants_nsfw());
         assert!(SubredditPool::NsfwOnly.wants_nsfw());
+        assert_eq!(SubredditPool::Sfw.as_str(), "sfw");
+        assert_eq!(SubredditPool::NsfwOnly.as_str(), "nsfw");
         assert_eq!(SubredditPool::from_str("nsfw"), SubredditPool::NsfwOnly);
+        assert_eq!(
+            DiscoverError::Network("timeout".into()).to_string(),
+            "Could not discover subreddits (timeout)"
+        );
     }
 
     #[test]

@@ -36,19 +36,19 @@ pub fn App() -> impl IntoView {
     let touch = RwSignal::new(TouchTracker::default());
     let animating = RwSignal::new(false);
     let goal = RwSignal::new(initial_goal);
-    /// Unblur range: 0% at reveal_from, 100% at reveal_to.
+    // Unblur range: 0% at reveal_from, 100% at reveal_to.
     let reveal_from = RwSignal::new(2u32);
     let reveal_to = RwSignal::new(initial_goal);
 
     let subreddit = RwSignal::new(load_subreddit());
     let subreddit_pool = RwSignal::new(load_subreddit_pool());
     let image = RwSignal::new(None::<RedditMedia>);
-    /// Queue of ready next posts (target depth 3) for instant Next / Next game.
+    // Queue of ready next posts (target depth 3) for instant Next / Next game.
     let preload_queue = RwSignal::new(Vec::<(RedditMedia, &'static str)>::new());
     let preload_busy = RwSignal::new(false);
-    /// Bumped to cancel in-flight prefetch workers.
+    // Bumped to cancel in-flight prefetch workers.
     let preload_gen = RwSignal::new(0u32);
-    /// Bumped to cancel in-flight foreground fetches (user switched sub mid-load).
+    // Bumped to cancel in-flight foreground fetches (user switched sub mid-load).
     let load_gen = RwSignal::new(0u32);
     const PRELOAD_TARGET: usize = 3;
     let slide_index = RwSignal::new(0usize);
@@ -178,7 +178,7 @@ pub fn App() -> impl IntoView {
         }
     };
 
-    /// Abort in-flight foreground + background fetches (user switched away).
+    // Abort in-flight foreground + background fetches (user switched away).
     let cancel_in_flight = move || {
         load_gen.update(|g| *g = g.wrapping_add(1));
         preload_gen.update(|g| *g = g.wrapping_add(1));
@@ -195,7 +195,7 @@ pub fn App() -> impl IntoView {
         }
     }
 
-    /// Fast fill: metadata-only posts so Next is ready soon.
+    // Fast fill: metadata-only posts so Next is ready soon.
     let fill_preload_queue = move || {
         if loading.get_untracked() || preload_busy.get_untracked() {
             return;
@@ -267,8 +267,8 @@ pub fn App() -> impl IntoView {
         });
     };
 
-    /// Background: re-verify + CDN-probe better posts and **replace** the queue when ready.
-    /// Does not block Play/Next — only upgrades what you'll get later.
+    // Background: re-verify + CDN-probe better posts and replace the queue when ready.
+    // Does not block Play/Next — only upgrades what you'll get later.
     let refine_queue_quality = move || {
         let raw = subreddit.get_untracked();
         if raw.trim().is_empty() {
@@ -306,9 +306,15 @@ pub fn App() -> impl IntoView {
         });
     };
 
-    /// Load next media. Supersedes any in-flight fetch (user can switch mid-load).
+    // Load next media. Supersedes any in-flight fetch (user can switch mid-load).
     let load_media = move || {
-        let raw = subreddit.get_untracked();
+        let mut raw = subreddit.get_untracked();
+        // Empty field → friendly default so Play works out of the box.
+        if raw.trim().is_empty() {
+            raw = "pics".to_string();
+            subreddit.set(raw.clone());
+            save_subreddit(&raw);
+        }
         let want_sub = normalize_subreddit(&raw).unwrap_or_else(|| raw.trim().to_string());
         let avoid = load_session_seen_urls();
 
@@ -423,12 +429,12 @@ pub fn App() -> impl IntoView {
         });
     };
 
-    /// Play / Next / Next game: new board + next post for the current sub.
+    // Play / Next / Next game: new board + next post for the current sub.
     let on_play = Callback::new(move |_: ()| {
         load_media();
     });
 
-    /// User is editing the sub field or skipping — abandon the fetch in progress.
+    // User is editing the sub field or skipping — abandon the fetch in progress.
     let on_sub_edit = Callback::new(move |_: ()| {
         cancel_in_flight();
         preload_queue.set(Vec::new());
@@ -552,6 +558,14 @@ pub fn App() -> impl IntoView {
                 </section>
 
                 <aside class="play-media">
+                    <Show when=move || !has_image.get() && !loading.get()>
+                        <section class="panel image-panel image-panel-empty" aria-label="How to start">
+                            <h2 class="panel-title">"Reveal"</h2>
+                            <p class="image-panel-meta">
+                                "Pick a goal, enter a subreddit (or tap SFW / NSFW), then Play. The image unblurs as you approach the goal tile."
+                            </p>
+                        </section>
+                    </Show>
                     <ImagePanel
                         items=media_items
                         image_title=image_title

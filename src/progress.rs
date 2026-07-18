@@ -23,6 +23,7 @@ pub fn reveal_progress_range(max_tile: u32, from: u32, to: u32) -> f32 {
 }
 
 /// Classic: from tile 2 up to win goal.
+#[cfg(test)]
 pub fn reveal_progress(max_tile: u32, win_tile: u32) -> f32 {
     reveal_progress_range(max_tile, 2, win_tile.max(2))
 }
@@ -40,17 +41,10 @@ pub fn veil_from_progress(progress: f32) -> f32 {
     0.72 - 0.42 * progress.clamp(0.0, 1.0)
 }
 
-/// CSS `blur()` radius in px.
+/// CSS `blur()` radius in px (used by unit tests).
+#[cfg(test)]
 pub fn blur_px(max_tile: u32, from: u32, to: u32) -> f32 {
     blur_from_progress(reveal_progress_range(max_tile, from, to))
-}
-
-pub fn image_opacity(max_tile: u32, from: u32, to: u32) -> f32 {
-    opacity_from_progress(reveal_progress_range(max_tile, from, to))
-}
-
-pub fn veil_opacity(max_tile: u32, from: u32, to: u32) -> f32 {
-    veil_from_progress(reveal_progress_range(max_tile, from, to))
 }
 
 #[cfg(test)]

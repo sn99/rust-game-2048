@@ -832,6 +832,17 @@ video.image-frame-img {
   min-height: 0;
 }
 
+.image-panel-empty {
+  justify-content: center;
+  gap: 0.5rem;
+  opacity: 0.92;
+}
+
+.image-panel-empty .image-panel-meta {
+  max-width: 28rem;
+  line-height: 1.45;
+}
+
 .image-panel-copy {
   min-width: 0;
 }

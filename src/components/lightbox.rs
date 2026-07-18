@@ -69,7 +69,7 @@ pub fn Lightbox(
                         }}
                     </p>
                     <div class="lightbox-actions">
-                        <Show when=move || (n_slides.get() > 1)>
+                        <Show when=move || { n_slides.get() > 1 }>
                             <button type="button" class="btn btn-ghost lightbox-btn" on:click=move |_| {
                                 let n = n_slides.get();
                                 slide_index.update(|i| *i = if *i == 0 { n - 1 } else { *i - 1 });

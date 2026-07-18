@@ -121,7 +121,7 @@ pub fn ImagePanel(
                         {move || format!("{}%", reveal_pct.get())}
                     </div>
 
-                    <Show when=move || (n_slides.get() > 1)>
+                    <Show when=move || { n_slides.get() > 1 }>
                         <button type="button" class="carousel-nav carousel-prev" aria-label="Previous" on:click=move |_| step(-1)>"‹"</button>
                         <button type="button" class="carousel-nav carousel-next" aria-label="Next" on:click=move |_| step(1)>"›"</button>
                         <div class="carousel-dots" aria-hidden="true">
