@@ -521,19 +521,21 @@ pub fn App() -> impl IntoView {
         lightbox_open.set(true);
     });
 
-    // Gallery: swap media only — keep board & reveal progress.
+    // Gallery: swap media only — keep board, reveal progress, and Unlocked order.
     let on_gallery_select = Callback::new(move |entry: GalleryEntry| {
         save_subreddit(&entry.media.subreddit);
         subreddit.set(entry.media.subreddit.clone());
         warm_media_cache(&entry.media);
         slide_index.set(0);
+        let arm_id = if entry.media.id.is_empty() {
+            entry.media.primary_url().to_string()
+        } else {
+            entry.media.id.clone()
+        };
         image.set(Some(entry.media));
         lightbox_sharp.set(false);
-        gallery_armed.set(None);
-        // If already past goal, re-arm so we don't re-insert; mark armed after check.
-        if post_unlocked.get_untracked() {
-            maybe_record_gallery();
-        }
+        // Already in the gallery — do not re-push (would reshuffle).
+        gallery_armed.set(Some(arm_id));
         persist_session();
     });
 

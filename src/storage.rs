@@ -211,11 +211,14 @@ pub fn load_gallery() -> Vec<GalleryEntry> {
 
 pub fn push_gallery_entry(entry: GalleryEntry) {
     let mut list = load_gallery();
-    // Dedup by post id / primary url — keep newest first.
-    list.retain(|e| {
-        e.media.id != entry.media.id
-            && e.media.primary_url() != entry.media.primary_url()
+    let already = list.iter().any(|e| {
+        (!entry.media.id.is_empty() && e.media.id == entry.media.id)
+            || e.media.primary_url() == entry.media.primary_url()
     });
+    // Already unlocked — keep its position (do not move on re-view / click).
+    if already {
+        return;
+    }
     list.insert(0, entry);
     list.truncate(GALLERY_MAX);
     if let Ok(raw) = serde_json::to_string(&list) {
