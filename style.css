@@ -776,6 +776,14 @@ video.image-frame-img {
   color: var(--text);
 }
 
+
+.overlay-hint {
+  margin: 8px 0 0;
+  font-size: 12px;
+  opacity: 0.7;
+  font-weight: 500;
+}
+
 .overlay-actions {
   display: flex;
   flex-wrap: wrap;
